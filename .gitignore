@@ -1,0 +1,25 @@
+# 后端
+backend/target/
+backend/logs/
+backend/data/
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
