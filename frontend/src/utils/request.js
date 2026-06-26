@@ -23,7 +23,15 @@ request.interceptors.request.use(
 
 request.interceptors.response.use(
   response => {
+    // 先判断 HTTP 状态码
+    if (response.status !== 200) {
+      ElMessage.error(`HTTP 错误: ${response.status}`)
+      return Promise.reject(new Error(`HTTP 错误: ${response.status}`))
+    }
+    
     const res = response.data
+    
+    // 再判断业务状态码
     if (res.code !== 200) {
       ElMessage.error(res.message || '请求失败')
       if (res.code === 401) {

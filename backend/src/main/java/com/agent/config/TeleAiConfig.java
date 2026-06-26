@@ -26,11 +26,6 @@ public class TeleAiConfig {
     private String apiKey;
     
     /**
-     * 是否启用星辰智能体
-     */
-    private boolean enabled = false;
-    
-    /**
      * HTTP 请求超时时间（毫秒）
      * 默认值：30000 (30秒)
      */
@@ -62,13 +57,5 @@ public class TeleAiConfig {
     public String getAuthorizationHeader() {
         return "Bearer " + apiKey;
     }
-    
-    /**
-     * 验证配置是否有效
-     *
-     * @return 是否有效
-     */
-    public boolean isValid() {
-        return enabled && apiKey != null && !apiKey.isEmpty() && baseUrl != null && !baseUrl.isEmpty();
-    }
+
 }

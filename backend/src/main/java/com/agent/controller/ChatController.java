@@ -1,5 +1,6 @@
 package com.agent.controller;
 
+import cn.hutool.core.thread.ThreadFactoryBuilder;
 import com.agent.client.TeleAiClient;
 import com.agent.common.Result;
 import com.agent.config.TeleAiConfig;
@@ -16,8 +17,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
 @RestController
 @RequestMapping("/chat")
@@ -31,10 +31,16 @@ public class ChatController {
     @Autowired
     private TeleAiClient teleAiClient;
     
-    @Autowired
-    private TeleAiConfig teleAiConfig;
-    
-    private final ExecutorService executorService = Executors.newCachedThreadPool();
+    private final ExecutorService executorService = new ThreadPoolExecutor(
+        10,
+        50,
+        60L, TimeUnit.SECONDS,
+        new LinkedBlockingQueue<>(100),
+        new ThreadFactoryBuilder()
+            .setNamePrefix("chat-stream-pool-")
+            .build(),
+        new ThreadPoolExecutor.CallerRunsPolicy()
+    );
     
     @GetMapping("/conversations")
     public Result<List<ConversationDTO>> getConversations() {
@@ -94,7 +100,7 @@ public class ChatController {
                     }
                     enhancedPrompt.append("\n");
                 }
-                enhancedPrompt.append("当前用户问题：").append(userMessage);
+                enhancedPrompt.append("当前用户提示词：").append(userMessage);
                 
                 chatService.addMessage(conversationId, "user", userMessage);
                 

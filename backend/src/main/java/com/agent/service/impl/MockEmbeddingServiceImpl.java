@@ -1,7 +1,8 @@
 package com.agent.service.impl;
 
 import com.agent.service.EmbeddingService;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -11,13 +12,12 @@ import java.util.Random;
 /**
  * Mock 嵌入服务实现，用于演示和测试
  * 生成随机向量，实际应用中应替换为真实的嵌入模型
- * 当 DJL Embedding Service 未启用时，此服务作为备用方案
+ * 当 embedding.enabled=false 或未配置时，此服务作为备用方案
  */
 @Service
-@ConditionalOnMissingBean(DjlEmbeddingServiceImpl.class)
+@Primary
+@ConditionalOnProperty(name = "embedding.enabled", havingValue = "false", matchIfMissing = true)
 public class MockEmbeddingServiceImpl implements EmbeddingService {
-    
-    private final Random random = new Random(42); // 使用固定种子以保证一致性
     private final int dimension = 384; // 使用常见的嵌入维度
     
     @Override

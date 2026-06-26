@@ -1,5 +1,6 @@
 package com.agent.config;
 
+import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +20,7 @@ import java.sql.Statement;
  * 如果扩展不可用，系统会使用默认的向量检索实现
  */
 @Configuration
+@Data
 public class SQLiteVecConfig {
     
     private static final Logger logger = LoggerFactory.getLogger(SQLiteVecConfig.class);

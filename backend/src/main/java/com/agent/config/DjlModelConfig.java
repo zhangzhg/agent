@@ -4,13 +4,13 @@ import ai.djl.ModelException;
 import ai.djl.inference.Predictor;
 import ai.djl.repository.zoo.Criteria;
 import ai.djl.repository.zoo.ZooModel;
-import ai.djl.translate.TranslateException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Primary;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -31,16 +31,12 @@ public class DjlModelConfig {
     
     /**
      * 创建 ZooModel Bean
-     * 如果模型不存在或配置未启用，返回 null
+     * 只有在 embedding.enabled=true 时才创建
      * 支持自动下载模型
      */
     @Bean
+    @ConditionalOnProperty(name = "embedding.enabled", havingValue = "true")
     public ZooModel<String, float[]> embeddingModel() {
-        if (!embeddingProperties.isEnabled()) {
-            logger.info("DJL embedding is disabled, using mock embedding service");
-            return null;
-        }
-        
         try {
             Path localModelPath = Paths.get(embeddingProperties.getModelPath());
             
@@ -70,7 +66,7 @@ public class DjlModelConfig {
         } catch (ModelException | IOException e) {
             logger.error("Failed to load embedding model: {}", e.getMessage());
             logger.info("Falling back to mock embedding service");
-            return null;
+            throw new RuntimeException("Failed to load embedding model", e);
         }
     }
     
@@ -98,21 +94,18 @@ public class DjlModelConfig {
     
     /**
      * 创建 Predictor Bean
-     * 如果模型不存在，返回 null
+     * 只有在 embeddingModel bean 存在时才创建
      */
     @Bean
+    @ConditionalOnBean(name = "embeddingModel")
     public Predictor<String, float[]> embeddingPredictor(ZooModel<String, float[]> model) {
-        if (model == null) {
-            return null;
-        }
-        
         try {
             Predictor<String, float[]> predictor = model.newPredictor();
             logger.info("Embedding predictor created successfully");
             return predictor;
         } catch (Exception e) {
             logger.error("Failed to create embedding predictor: {}", e.getMessage());
-            return null;
+            throw new RuntimeException("Failed to create embedding predictor", e);
         }
     }
 }

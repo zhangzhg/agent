@@ -7,6 +7,7 @@ import com.agent.service.EmbeddingService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Service;
 
@@ -17,9 +18,11 @@ import java.util.List;
 /**
  * DJL Embedding 服务实现
  * 使用 DJL 加载 sentence-transformers 模型进行真实的文本嵌入
+ * 只有在 embedding.enabled=true 时才会创建
  */
 @Service
 @Primary
+@ConditionalOnProperty(name = "embedding.enabled", havingValue = "true")
 public class DjlEmbeddingServiceImpl implements EmbeddingService {
     
     private static final Logger logger = LoggerFactory.getLogger(DjlEmbeddingServiceImpl.class);

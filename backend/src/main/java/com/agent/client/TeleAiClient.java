@@ -46,11 +46,6 @@ public class TeleAiClient {
      * @return 响应对象
      */
     public TeleAiResponse chat(TeleAiRequest request) {
-        if (!teleAiConfig.isValid()) {
-            logger.warn("TeleAi is not configured properly");
-            throw new RuntimeException("TeleAi configuration is invalid");
-        }
-        
         // 设置阻塞模式
         request.setMode("blocking");
         
@@ -82,11 +77,6 @@ public class TeleAiClient {
      * @param onError 错误回调函数
      */
     public void chatStream(TeleAiRequest request, Consumer<String> onMessage, Runnable onEnd, Consumer<String> onError) {
-        if (!teleAiConfig.isValid()) {
-            logger.warn("TeleAi is not configured properly");
-            throw new RuntimeException("TeleAi configuration is invalid");
-        }
-        
         // 设置流式模式
         request.setMode("streaming");
         
