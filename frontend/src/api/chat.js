@@ -33,6 +33,7 @@ export function streamChat(
   conversationId,
   message,
   onMessage,
+  onThought,
   onConversationId,
   onDone,
   onError,
@@ -81,6 +82,9 @@ export function streamChat(
 
                 if (eventType === "message") {
                   onMessage(data);
+                } else if (eventType === "thought") {
+                  // 处理思考过程事件
+                  onThought(data);
                 } else if (eventType === "conversationId") {
                   onConversationId(parseInt(data));
                 } else if (eventType === "done") {

@@ -68,15 +68,16 @@ public class TeleAiClient {
     }
     
     /**
-     * 发送聊天消息（流式模式，支持结束和错误回调）
+     * 发送聊天消息（流式模式，支持思考过程、结束和错误回调）
      * 使用 SSE (Server-Sent Events) 接收流式响应
      *
      * @param request 请求对象
      * @param onMessage 消息处理回调函数
+     * @param onThought 思考过程处理回调函数（agent_thought 事件）
      * @param onEnd 结束回调函数
      * @param onError 错误回调函数
      */
-    public void chatStream(TeleAiRequest request, Consumer<String> onMessage, Runnable onEnd, Consumer<String> onError) {
+    public void chatStream(TeleAiRequest request, Consumer<String> onMessage, Consumer<TeleAiStreamEvent> onThought, Runnable onEnd, Consumer<String> onError) {
         // 设置流式模式
         request.setMode("streaming");
         
@@ -87,7 +88,7 @@ public class TeleAiClient {
             HttpResponse response = httpClientUtil.postStream(url, headers, request, teleAiConfig.getStreamTimeout());
             
             // 处理 SSE 流式响应
-            processSseStream(response, onMessage, onEnd, onError);
+            processSseStream(response, onMessage, onThought, onEnd, onError);
             
         } catch (Exception e) {
             logger.error("TeleAi chat stream failed: {}", e.getMessage());
@@ -113,16 +114,17 @@ public class TeleAiClient {
     }
     
     /**
-     * 发送简单聊天消息（流式模式，支持结束和错误回调）
+     * 发送简单聊天消息（流式模式，支持思考过程、结束和错误回调）
      *
      * @param query 查询内容
      * @param onMessage 消息处理回调函数
+     * @param onThought 思考过程处理回调函数（agent_thought 事件）
      * @param onEnd 结束回调函数
      * @param onError 错误回调函数
      */
-    public void chatSimpleStream(String query, Consumer<String> onMessage, Runnable onEnd, Consumer<String> onError) {
+    public void chatSimpleStream(String query, Consumer<String> onMessage, Consumer<TeleAiStreamEvent> onThought, Runnable onEnd, Consumer<String> onError) {
         TeleAiRequest request = TeleAiRequest.createSimple(query, teleAiConfig.getDefaultUser());
-        chatStream(request, onMessage, onEnd, onError);
+        chatStream(request, onMessage, onThought, onEnd, onError);
     }
     
     /**
@@ -138,17 +140,18 @@ public class TeleAiClient {
     }
     
     /**
-     * 发送带对话上下文的聊天消息（流式模式，支持结束和错误回调）
+     * 发送带对话上下文的聊天消息（流式模式，支持思考过程、结束和错误回调）
      *
      * @param query 查询内容
      * @param conversationId 对话 ID
      * @param onMessage 消息处理回调函数
+     * @param onThought 思考过程处理回调函数（agent_thought 事件）
      * @param onEnd 结束回调函数
      * @param onError 错误回调函数
      */
-    public void chatWithConversationStream(String query, String conversationId, Consumer<String> onMessage, Runnable onEnd, Consumer<String> onError) {
+    public void chatWithConversationStream(String query, String conversationId, Consumer<String> onMessage, Consumer<TeleAiStreamEvent> onThought, Runnable onEnd, Consumer<String> onError) {
         TeleAiRequest request = TeleAiRequest.createWithConversation(query, conversationId, teleAiConfig.getDefaultUser());
-        chatStream(request, onMessage, onEnd, onError);
+        chatStream(request, onMessage, onThought, onEnd, onError);
     }
     
     /**
@@ -164,17 +167,18 @@ public class TeleAiClient {
     }
     
     /**
-     * 发送带图片的聊天消息（流式模式，支持结束和错误回调）
+     * 发送带图片的聊天消息（流式模式，支持思考过程、结束和错误回调）
      *
      * @param query 查询内容
      * @param imageUrl 图片 URL
      * @param onMessage 消息处理回调函数
+     * @param onThought 思考过程处理回调函数（agent_thought 事件）
      * @param onEnd 结束回调函数
      * @param onError 错误回调函数
      */
-    public void chatWithImageStream(String query, String imageUrl, Consumer<String> onMessage, Runnable onEnd, Consumer<String> onError) {
+    public void chatWithImageStream(String query, String imageUrl, Consumer<String> onMessage, Consumer<TeleAiStreamEvent> onThought, Runnable onEnd, Consumer<String> onError) {
         TeleAiRequest request = TeleAiRequest.createWithImage(query, imageUrl, teleAiConfig.getDefaultUser());
-        chatStream(request, onMessage, onEnd, onError);
+        chatStream(request, onMessage, onThought, onEnd, onError);
     }
     
     /**
@@ -194,14 +198,15 @@ public class TeleAiClient {
      * TeleAi API 流式返回格式：
      * - 每个流式块格式：data: {"event": "message", ...}\n\n
      * - 块之间以 \n\n 分隔
-     * - 事件类型：message（普通消息）、message_end（结束）、error（异常）
+     * - 事件类型：message（普通消息）、message_end（结束）、error（异常）、agent_thought（思考过程）
      *
      * @param response HTTP 响应对象
      * @param onMessage 消息处理回调函数
+     * @param onThought 思考过程处理回调函数（agent_thought 事件）
      * @param onEnd 结束回调函数
      * @param onError 错误回调函数
      */
-    private void processSseStream(HttpResponse response, Consumer<String> onMessage, Runnable onEnd, Consumer<String> onError) {
+    private void processSseStream(HttpResponse response, Consumer<String> onMessage, Consumer<TeleAiStreamEvent> onThought, Runnable onEnd, Consumer<String> onError) {
         try (InputStream inputStream = response.bodyStream();
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
             
@@ -228,6 +233,17 @@ public class TeleAiClient {
                                     }
                                     break;
                                     
+                                case "agent_thought":
+                                    // 智能体思考过程事件
+                                    logger.debug("Agent thought - Position: {}, Thought: {}, Tool: {}", 
+                                        event.getPosition(), event.getThought(), event.getTool());
+                                    
+                                    // 调用思考过程回调
+                                    if (onThought != null) {
+                                        onThought.accept(event);
+                                    }
+                                    break;
+                                    
                                 case "message_end":
                                     // 消息结束事件
                                     logger.info("SSE stream completed - TaskId: {}, MessageId: {}", 
@@ -249,7 +265,7 @@ public class TeleAiClient {
                                     throw new RuntimeException("TeleAi stream error: " + event.getMessage());
                                     
                                 default:
-                                    logger.warn("Unknown SSE event type: {}", event.getEvent());
+                                    logger.debug("Other SSE event type: {}", event.getEvent());
                             }
                             
                         } catch (RuntimeException e) {

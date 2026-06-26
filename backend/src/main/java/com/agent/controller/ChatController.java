@@ -145,6 +145,28 @@ public class ChatController {
                         logger.error("Error sending SSE message: {}", e.getMessage());
                     }
                 },
+                // 思考过程回调
+                thoughtEvent -> {
+                    try {
+                        // 将思考过程发送到前端（使用不同的事件类型）
+                        logger.debug("Sending thought event: position={}, thought={}", 
+                            thoughtEvent.getPosition(), thoughtEvent.getThought());
+                        
+                        // 构建思考内容 JSON
+                        String thoughtJson = String.format(
+                            "{\"position\":%d,\"thought\":\"%s\",\"observation\":\"%s\",\"tool\":\"%s\",\"toolInput\":\"%s\"}",
+                            thoughtEvent.getPosition(),
+                            thoughtEvent.getThought() != null ? thoughtEvent.getThought() : "",
+                            thoughtEvent.getObservation() != null ? thoughtEvent.getObservation() : "",
+                            thoughtEvent.getTool() != null ? thoughtEvent.getTool() : "",
+                            thoughtEvent.getToolInput() != null ? thoughtEvent.getToolInput() : ""
+                        );
+                        
+                        emitter.send(SseEmitter.event().name("thought").data(thoughtJson));
+                    } catch (Exception e) {
+                        logger.error("Error sending SSE thought: {}", e.getMessage());
+                    }
+                },
                 // 结束回调
                 () -> {
                     try {
