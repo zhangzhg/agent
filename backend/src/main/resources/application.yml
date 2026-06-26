@@ -48,7 +48,7 @@ sqlite:
 # 星辰智能体配置
 teleai:
   base-url: https://agent.teleai.com.cn/v1  # API 基础地址
-  api-key: app-GhmqsgrHP1ubvMT22gSjHNzZ  # API Key（请替换为实际的 API Key）
+  api-key: app-bEKS4xCRe03yDpfbWCeSG3D3  # API Key（请替换为实际的 API Key）
   timeout: 30000  # HTTP 请求超时时间（毫秒）
   stream-timeout: 120000  # 流式响应超时时间（毫秒）
   default-user: admin  # 默认用户标识

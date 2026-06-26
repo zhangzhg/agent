@@ -3,6 +3,7 @@ package com.agent.entity;
 import com.agent.config.LocalDateTimeTypeHandler;
 import com.baomidou.mybatisplus.annotation.*;
 import lombok.Data;
+import org.apache.ibatis.type.ByteArrayTypeHandler;
 import org.apache.ibatis.type.JdbcType;
 import java.time.LocalDateTime;
 
@@ -17,7 +18,8 @@ public class Message {
     private String role;
     
     private String content;
-    
+
+    @TableField(value = "embedding", typeHandler = ByteArrayTypeHandler.class)
     private byte[] embedding;
     
     @TableField(fill = FieldFill.INSERT, typeHandler = LocalDateTimeTypeHandler.class, jdbcType = JdbcType.TIMESTAMP)
