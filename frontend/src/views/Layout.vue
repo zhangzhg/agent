@@ -52,27 +52,28 @@ const router = useRouter()
 const userStore = useUserStore()
 const chatStore = useChatStore()
 
-onMounted(() => {
+onMounted(async () => {
+  await chatStore.loadConversations()
   if (chatStore.conversations.length === 0) {
-    chatStore.createNewConversation()
+    await chatStore.createNewConversation()
   }
 })
 
-const handleNewChat = () => {
-  chatStore.createNewConversation()
+const handleNewChat = async () => {
+  await chatStore.createNewConversation()
 }
 
 const handleSelectConversation = (id) => {
   chatStore.setCurrentConversation(id)
 }
 
-const handleDeleteConversation = (id) => {
+const handleDeleteConversation = async (id) => {
   ElMessageBox.confirm('确定要删除这个对话吗？', '提示', {
     confirmButtonText: '确定',
     cancelButtonText: '取消',
     type: 'warning'
-  }).then(() => {
-    chatStore.deleteConversation(id)
+  }).then(async () => {
+    await chatStore.deleteConversationById(id)
     ElMessage.success('删除成功')
   }).catch(() => {})
 }

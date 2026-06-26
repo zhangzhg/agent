@@ -29,3 +29,26 @@ jwt:
 # 加密配置
 encryption:
   aes-key: ThisIsASecretKey1234567890123456
+
+# Embedding 本地向量化配置（DJL sentence-transformers）
+embedding:
+  enabled: false  # 是否启用 DJL embedding（需要先转换模型）
+  model-path: models/sentence-transformers  # 本地模型路径
+  model-name: sentence-transformers/all-MiniLM-L6-v2  # HuggingFace 模型名称
+  dimension: 384  # 向量维度（all-MiniLM-L6-v2 的维度）
+
+# SQLite Vec 扩展配置（可选）
+sqlite:
+  vec:
+    enabled: false  # 是否启用 sqlite-vec 扩展
+    path: "extensions/vec0.dll"  # sqlite-vec 扩展文件路径（如：C:\\path\\to\\vec0.dll）
+
+# 星辰智能体配置
+teleai:
+  enabled: true  # 是否启用星辰智能体
+  base-url: https://agent.teleai.com.cn/v1  # API 基础地址
+  api-key: app-GhmqsgrHP1ubvMT22gSjHNzZ  # API Key（请替换为实际的 API Key）
+  timeout: 30000  # HTTP 请求超时时间（毫秒）
+  stream-timeout: 120000  # 流式响应超时时间（毫秒）
+  default-user: admin  # 默认用户标识
+  default-mode: streaming  # 默认模式（streaming 或 blocking）

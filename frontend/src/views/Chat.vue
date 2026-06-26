@@ -41,14 +41,19 @@
 </template>
 
 <script setup>
-import { ref, nextTick, watch } from 'vue'
+import { ref, nextTick, watch, onMounted } from 'vue'
 import { useChatStore } from '@/stores/chat'
+import { streamChat } from '@/api/chat'
 
 const chatStore = useChatStore()
 
 const inputMessage = ref('')
 const sending = ref(false)
 const messagesRef = ref(null)
+
+onMounted(async () => {
+  await chatStore.loadConversations()
+})
 
 watch(() => chatStore.currentConversationId, () => {
   scrollToBottom()
@@ -68,11 +73,14 @@ const handleSend = async () => {
   const message = inputMessage.value.trim()
   inputMessage.value = ''
   
-  if (!chatStore.currentConversationId) {
-    chatStore.createNewConversation()
+  let conversationId = chatStore.currentConversationId
+  
+  if (!conversationId) {
+    conversationId = await chatStore.createNewConversation()
+    if (!conversationId) return
   }
   
-  chatStore.addMessage(chatStore.currentConversationId, {
+  chatStore.addMessage(conversationId, {
     role: 'user',
     content: message,
     timestamp: new Date().toISOString()
@@ -80,7 +88,7 @@ const handleSend = async () => {
   
   if (chatStore.getCurrentMessages().length === 1) {
     chatStore.updateConversationTitle(
-      chatStore.currentConversationId,
+      conversationId,
       message.substring(0, 20) + (message.length > 20 ? '...' : '')
     )
   }
@@ -89,15 +97,36 @@ const handleSend = async () => {
   
   sending.value = true
   
-  setTimeout(() => {
-    chatStore.addMessage(chatStore.currentConversationId, {
-      role: 'assistant',
-      content: '这是一个模拟的AI回复。在实际应用中，这里应该调用后端的AI接口来获取真实的回复内容。',
-      timestamp: new Date().toISOString()
-    })
-    sending.value = false
-    scrollToBottom()
-  }, 1000)
+  const assistantMessage = {
+    role: 'assistant',
+    content: '',
+    timestamp: new Date().toISOString()
+  }
+  chatStore.addMessage(conversationId, assistantMessage)
+  
+  const messageIndex = chatStore.getCurrentMessages().length - 1
+  
+  streamChat(
+    conversationId,
+    message,
+    (chunk) => {
+      chatStore.getCurrentMessages()[messageIndex].content += chunk
+      scrollToBottom()
+    },
+    (newConversationId) => {
+      if (!chatStore.currentConversationId) {
+        chatStore.currentConversationId = newConversationId
+      }
+    },
+    () => {
+      sending.value = false
+    },
+    (error) => {
+      console.error('Stream error:', error)
+      sending.value = false
+      chatStore.getCurrentMessages()[messageIndex].content = '抱歉，发生了错误，请重试。'
+    }
+  )
 }
 </script>
 

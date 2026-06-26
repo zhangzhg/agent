@@ -61,6 +61,28 @@ CREATE TABLE IF NOT EXISTS role_resource (
     UNIQUE(role_id, resource_id)
 );
 
+-- 对话表
+CREATE TABLE IF NOT EXISTS conversation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    deleted INTEGER DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES user(id)
+);
+
+-- 消息表
+CREATE TABLE IF NOT EXISTS message (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL,
+    role VARCHAR(20) NOT NULL,
+    content TEXT NOT NULL,
+    embedding BLOB,
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conversation_id) REFERENCES conversation(id)
+);
+
 -- 初始化管理员用户 (密码: 123456，使用BCrypt加密)
 INSERT INTO user (username, password, email, status) 
 SELECT 'admin', '$2a$10$2/VcWSVkT1VhOOMpPdA8BOQcadTlgDAOeXUprQofARZlZV3IZlluG', 'admin@example.com', 1

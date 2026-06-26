@@ -1,26 +1,64 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { getConversations, getConversation, createConversation, deleteConversation } from '@/api/chat'
 
 export const useChatStore = defineStore('chat', () => {
   const conversations = ref([])
   const currentConversationId = ref(null)
   const messages = ref({})
+  const loading = ref(false)
 
-  function createNewConversation() {
-    const id = Date.now().toString()
-    const conversation = {
-      id,
-      title: '新对话',
-      createTime: new Date().toLocaleString()
+  async function loadConversations() {
+    try {
+      loading.value = true
+      const response = await getConversations()
+      conversations.value = response.data || []
+    } catch (error) {
+      console.error('加载对话列表失败:', error)
+    } finally {
+      loading.value = false
     }
-    conversations.value.unshift(conversation)
-    messages.value[id] = []
-    currentConversationId.value = id
-    return id
+  }
+
+  async function loadConversationMessages(conversationId) {
+    try {
+      loading.value = true
+      const response = await getConversation(conversationId)
+      if (response.data) {
+        messages.value[conversationId] = response.data.messages || []
+      }
+    } catch (error) {
+      console.error('加载对话消息失败:', error)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function createNewConversation() {
+    try {
+      const response = await createConversation('新对话')
+      const conversationId = response.data
+      
+      const conversation = {
+        id: conversationId,
+        title: '新对话',
+        createTime: new Date().toLocaleString()
+      }
+      conversations.value.unshift(conversation)
+      messages.value[conversationId] = []
+      currentConversationId.value = conversationId
+      return conversationId
+    } catch (error) {
+      console.error('创建对话失败:', error)
+      return null
+    }
   }
 
   function setCurrentConversation(id) {
     currentConversationId.value = id
+    if (id && !messages.value[id]) {
+      loadConversationMessages(id)
+    }
   }
 
   function addMessage(conversationId, message) {
@@ -37,14 +75,19 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
-  function deleteConversation(id) {
-    const index = conversations.value.findIndex(c => c.id === id)
-    if (index !== -1) {
-      conversations.value.splice(index, 1)
-      delete messages.value[id]
-      if (currentConversationId.value === id) {
-        currentConversationId.value = conversations.value[0]?.id || null
+  async function deleteConversationById(id) {
+    try {
+      await deleteConversation(id)
+      const index = conversations.value.findIndex(c => c.id === id)
+      if (index !== -1) {
+        conversations.value.splice(index, 1)
+        delete messages.value[id]
+        if (currentConversationId.value === id) {
+          currentConversationId.value = conversations.value[0]?.id || null
+        }
       }
+    } catch (error) {
+      console.error('删除对话失败:', error)
     }
   }
 
@@ -56,11 +99,14 @@ export const useChatStore = defineStore('chat', () => {
     conversations,
     currentConversationId,
     messages,
+    loading,
+    loadConversations,
+    loadConversationMessages,
     createNewConversation,
     setCurrentConversation,
     addMessage,
     updateConversationTitle,
-    deleteConversation,
+    deleteConversationById,
     getCurrentMessages
   }
 })
