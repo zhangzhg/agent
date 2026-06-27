@@ -111,10 +111,6 @@ public class ChatController {
                 generateAIResponseWithTeleAi(enhancedPrompt.toString(), emitter, responseBuilder);
 
                 chatService.addMessage(conversationId, "assistant", responseBuilder.toString());
-        
-                emitter.send(SseEmitter.event().name("done").data("完成"));
-                emitter.complete();
-                
             } catch (Exception e) {
                 emitter.completeWithError(e);
             }
@@ -203,18 +199,6 @@ public class ChatController {
             
         } catch (Exception e) {
             logger.error("TeleAi API call failed: {}", e.getMessage());
-            
-            // 如果 TeleAi 调用失败，使用模拟回复
-            try {
-                String fallbackResponse = "抱歉，AI 服务暂时不可用。错误信息：" + e.getMessage();
-                responseBuilder.append(fallbackResponse);
-                emitter.send(SseEmitter.event().name("message").data(fallbackResponse));
-                emitter.send(SseEmitter.event().name("done").data("完成"));
-                emitter.complete();
-            } catch (Exception ex) {
-                logger.error("Error sending fallback message: {}", ex.getMessage());
-                emitter.completeWithError(ex);
-            }
         }
     }
 }

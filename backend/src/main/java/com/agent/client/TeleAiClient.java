@@ -92,13 +92,11 @@ public class TeleAiClient {
             
         } catch (Exception e) {
             logger.error("TeleAi chat stream failed: {}", e.getMessage());
-            
+
             // 调用错误回调
             if (onError != null) {
                 onError.accept(e.getMessage());
             }
-            
-            throw new RuntimeException("TeleAi chat stream request failed: " + e.getMessage(), e);
         }
     }
     
@@ -211,75 +209,39 @@ public class TeleAiClient {
              BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
             
             String line;
+            StringBuilder dataBuilder = new StringBuilder();
+            String sseEventName = null;
             
             while ((line = reader.readLine()) != null) {
-                // SSE 格式：data: {json}
-                if (line.startsWith("data: ")) {
-                    String data = line.substring(6).trim();
-                    
-                    if (!data.isEmpty()) {
-                        // 解析 JSON 数据
-                        try {
-                            TeleAiStreamEvent event = httpClientUtil.parseJson(data, TeleAiStreamEvent.class);
-                            
-                            logger.debug("SSE event received: {} - {}", event.getEvent(), data);
-                            
-                            // 根据事件类型处理
-                            switch (event.getEvent()) {
-                                case "message":
-                                    // 普通消息，提取 answer 内容
-                                    if (event.getAnswer() != null && !event.getAnswer().isEmpty()) {
-                                        onMessage.accept(event.getAnswer());
-                                    }
-                                    break;
-                                    
-                                case "agent_thought":
-                                    // 智能体思考过程事件
-                                    logger.debug("Agent thought - Position: {}, Thought: {}, Tool: {}", 
-                                        event.getPosition(), event.getThought(), event.getTool());
-                                    
-                                    // 调用思考过程回调
-                                    if (onThought != null) {
-                                        onThought.accept(event);
-                                    }
-                                    break;
-                                    
-                                case "message_end":
-                                    // 消息结束事件
-                                    logger.info("SSE stream completed - TaskId: {}, MessageId: {}", 
-                                        event.getTaskId(), event.getId());
-                                    
-                                    // 调用结束回调
-                                    onEnd.run();
-                                    
-                                    return; // 结束流处理
-                                    
-                                case "error":
-                                    // 异常事件
-                                    logger.error("SSE stream error - Code: {}, Message: {}", 
-                                        event.getCode(), event.getMessage());
-                                    
-                                    // 调用错误回调
-                                    onError.accept(event.getMessage());
-                                    
-                                    throw new RuntimeException("TeleAi stream error: " + event.getMessage());
-                                    
-                                default:
-                                    logger.debug("Other SSE event type: {}", event.getEvent());
-                            }
-                            
-                        } catch (RuntimeException e) {
-                            // 如果是 TeleAi stream error，直接抛出（已经调用了错误回调）
-                            if (e.getMessage().startsWith("TeleAi stream error")) {
-                                throw e;
-                            }
-                            
-                            logger.error("Failed to parse SSE event: {} - {}", data, e.getMessage());
-                            // 继续处理下一个事件，不中断流
-                        }
+                if (line.startsWith("event:")) {
+                    sseEventName = line.substring(6).trim();
+                    continue;
+                }
+                
+                if (line.startsWith("data:")) {
+                    String dataLine = line.substring(5);
+                    if (dataLine.startsWith(" ")) {
+                        dataLine = dataLine.substring(1);
+                    }
+                    dataBuilder.append(dataLine).append('\n');
+                    continue;
+                }
+                
+                if (line.isEmpty()) {
+                    boolean stop = flushSseEvent(sseEventName, dataBuilder.toString().trim(), onMessage, onThought, onEnd, onError);
+                    dataBuilder.setLength(0);
+                    sseEventName = null;
+                    if (stop) {
+                        return;
                     }
                 }
-                // 忽略空行（\n\n 分隔符）
+            }
+            
+            if (dataBuilder.length() > 0) {
+                boolean stop = flushSseEvent(sseEventName, dataBuilder.toString().trim(), onMessage, onThought, onEnd, onError);
+                if (stop) {
+                    return;
+                }
             }
             
             logger.info("SSE stream ended normally");
@@ -290,12 +252,82 @@ public class TeleAiClient {
         } catch (Exception e) {
             logger.error("SSE stream processing error: {}", e.getMessage());
             
-            // 调用错误回调（如果还没有调用）
-            if (!e.getMessage().contains("TeleAi stream error")) {
+            if (!e.getMessage().contains("TeleAi stream error") && onError != null) {
                 onError.accept(e.getMessage());
             }
             
             throw new RuntimeException("SSE stream processing failed: " + e.getMessage(), e);
+        }
+    }
+    
+    private boolean flushSseEvent(String sseEventName, String rawData, Consumer<String> onMessage, Consumer<TeleAiStreamEvent> onThought, Runnable onEnd, Consumer<String> onError) {
+        if (rawData == null || rawData.isEmpty()) {
+            return false;
+        }
+        
+        try {
+            TeleAiStreamEvent event = httpClientUtil.parseJson(rawData, TeleAiStreamEvent.class);
+            if ((event.getEvent() == null || event.getEvent().isEmpty()) && sseEventName != null) {
+                event.setEvent(sseEventName);
+            }
+            
+            logger.debug("SSE event received: {} - {}", event.getEvent(), rawData);
+            
+            switch (event.getEvent()) {
+                case "message":
+                case "message_replace":
+                    String answerText = event.getAnswerText();
+                    if (answerText != null && !answerText.isEmpty()) {
+                        onMessage.accept(answerText);
+                    }
+                    return false;
+                case "message_file":
+                    logger.debug("SSE message_file event received: {}", rawData);
+                    return false;
+                case "agent_thought":
+                    logger.debug("Agent thought - Position: {}, Thought: {}, Tool: {}", 
+                        event.getPosition(), event.getThought(), event.getTool());
+                    if (onThought != null) {
+                        onThought.accept(event);
+                    }
+                    return false;
+                case "message_end":
+                    logger.info("SSE stream completed - TaskId: {}, MessageId: {}", 
+                        event.getTaskId(), event.getId());
+                    onEnd.run();
+                    return true;
+                case "workflow_started":
+                case "node_started":
+                case "node_finished":
+                case "workflow_finished":
+                    logger.debug("Workflow event received: {} - {}", event.getEvent(), rawData);
+                    return false;
+                case "check_failed":
+                    String failedMsg = event.getCheckFailedMsg() != null ? event.getCheckFailedMsg() : event.getMessage();
+                    logger.error("SSE check failed event: {}", failedMsg);
+                    if (onError != null) {
+                        onError.accept(failedMsg);
+                    }
+                    return true;
+                case "error":
+                    logger.error("SSE stream error - Code: {}, Message: {}", event.getCode(), event.getMessage());
+                    if (onError != null) {
+                        onError.accept(event.getMessage());
+                    }
+                    throw new RuntimeException("TeleAi stream error: " + event.getMessage());
+                case "ping":
+                    logger.debug("SSE ping received");
+                    return false;
+                default:
+                    logger.debug("Other SSE event type: {} - {}", event.getEvent(), rawData);
+                    return false;
+            }
+        } catch (RuntimeException e) {
+            if (e.getMessage().startsWith("TeleAi stream error")) {
+                throw e;
+            }
+            logger.error("Failed to parse SSE event: {} - {}", rawData, e.getMessage());
+            return false;
         }
     }
 }

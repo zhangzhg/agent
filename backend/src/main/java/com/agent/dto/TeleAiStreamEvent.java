@@ -7,6 +7,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.Map;
+
 /**
  * 星辰智能体流式事件 DTO
  * 用于接收流式响应的事件数据
@@ -15,10 +17,15 @@ import lombok.NoArgsConstructor;
  * - message：普通消息
  * - message_end：结束事件
  * - error：异常事件
- * - node_started：工作流节点开始
- * - node_finished：工作流节点完成
- * - agent_thought：智能体思考过程
- * 
+ * - workflow_started：工作流开始事件
+ * - node_started：工作流节点开始事件
+ * - node_finished：工作流节点完成事件
+ * - workflow_finished：工作流完成事件
+ * - message_file：消息文件事件
+ * - message_replace：消息替换事件
+ * - ping：保活事件
+ * - check_failed：内容合规失败事件
+ *
  * 使用 @JsonIgnoreProperties(ignoreUnknown = true) 忽略未知字段，避免解析错误
  */
 @Data
@@ -54,8 +61,9 @@ public class TeleAiStreamEvent {
     
     /**
      * 回答内容（message 事件）
+     * 可能是直接文本，也可能是一个包含 message_id / conversation_id / answer / created_at 的嵌套对象
      */
-    private String answer;
+    private Object answer;
     
     /**
      * 创建时间
@@ -77,6 +85,12 @@ public class TeleAiStreamEvent {
      * 错误消息（error 事件）
      */
     private String message;
+    
+    /**
+     * 合规失败信息（check_failed 事件）
+     */
+    @JsonProperty("check_failed_msg")
+    private String checkFailedMsg;
     
     // ========== agent_thought 事件字段（智能体思考过程）==========
     
@@ -114,6 +128,34 @@ public class TeleAiStreamEvent {
      */
     public boolean isMessage() {
         return "message".equals(event);
+    }
+    
+    /**
+     * 返回 answer 文本内容
+     * 如果 answer 是对象，则尝试提取嵌套字段中的 answer
+     *
+     * @return 文本 answer 或 null
+     */
+    public String getAnswerText() {
+        if (answer == null) {
+            return null;
+        }
+        if (answer instanceof String) {
+            return (String) answer;
+        }
+        if (answer instanceof Map) {
+            Object nested = ((Map<?, ?>) answer).get("answer");
+            if (nested instanceof String) {
+                return (String) nested;
+            }
+            if (nested != null) {
+                return nested.toString();
+            }
+        }
+        if (answer instanceof TeleAiStreamEvent) {
+            return ((TeleAiStreamEvent) answer).getAnswerText();
+        }
+        return answer.toString();
     }
     
     /**

@@ -1,5 +1,6 @@
 package com.agent.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -25,6 +26,7 @@ public class TeleAiFile {
      * 传输方式
      * 可选值：remote_url（远程 URL）, local_file（本地文件）
      */
+    @JsonProperty("transfer_method")
     private String transferMethod;
     
     /**

@@ -1,5 +1,6 @@
 package com.agent.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -22,6 +23,7 @@ public class TeleAiRequest {
      * 输入数据（可选）
      * 用于传递额外的输入参数
      */
+    @JsonProperty("input_data")
     private Map<String, Object> inputData;
     
     /**
@@ -35,6 +37,7 @@ public class TeleAiRequest {
      * 用于保持对话上下文
      * 首次对话时为空字符串
      */
+    @JsonProperty("conversation_id")
     private String conversationId;
     
     /**

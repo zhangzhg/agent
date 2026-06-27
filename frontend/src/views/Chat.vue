@@ -32,22 +32,20 @@
                 class="thinking-item"
               >
                 <div v-if="thought.thought" class="thought-content">
-                  <strong>思考：</strong>{{ thought.thought }}
+                  <strong>思考：</strong><span v-html="renderMarkdown(thought.thought)"></span>
                 </div>
                 <div v-if="thought.tool" class="tool-info">
                   <strong>工具：</strong>{{ thought.tool }}
-                  <div v-if="thought.toolInput" class="tool-input">
-                    {{ thought.toolInput }}
-                  </div>
+                  <div v-if="thought.toolInput" class="tool-input" v-html="renderMarkdown(thought.toolInput)"></div>
                 </div>
                 <div v-if="thought.observation" class="observation-content">
-                  <strong>观察：</strong>{{ thought.observation }}
+                  <strong>观察：</strong><span v-html="renderMarkdown(thought.observation)"></span>
                 </div>
               </div>
             </div>
           </div>
           <!-- 最终消息内容 -->
-          <div class="message-text">{{ msg.content }}</div>
+          <div class="message-text" v-html="renderMarkdown(msg.content)"></div>
         </div>
       </div>
       <div
@@ -108,6 +106,86 @@ const scrollToBottom = () => {
   });
 };
 
+const escapeHtml = (text) => {
+  if (!text) return "";
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+};
+
+const parseInlineMarkdown = (text) => {
+  if (!text) return "";
+  let result = escapeHtml(text);
+  result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  result = result.replace(/__(.+?)__/g, "<strong>$1</strong>");
+  result = result.replace(/`(.+?)`/g, "<code>$1</code>");
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="nofollow noopener noreferrer">$1</a>');
+  return result;
+};
+
+const renderMarkdown = (text) => {
+  if (!text) return "";
+  const lines = text.split(/\r?\n/);
+  let html = "";
+  let inList = false;
+
+  const flushList = () => {
+    if (inList) {
+      html += "</ul>";
+      inList = false;
+    }
+  };
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (/^[-*+]\s+/.test(trimmed)) {
+      if (!inList) {
+        html += "<ul>";
+        inList = true;
+      }
+      html += `<li>${parseInlineMarkdown(trimmed.replace(/^[-*+]\s+/, ""))}</li>`;
+      return;
+    }
+
+    flushList();
+
+    if (/^#{1,6}\s+/.test(trimmed)) {
+      const level = trimmed.match(/^#{1,6}/)[0].length;
+      html += `<h${level}>${parseInlineMarkdown(trimmed.replace(/^#{1,6}\s+/, ""))}</h${level}>`;
+    } else if (/^>\s+/.test(trimmed)) {
+      html += `<blockquote>${parseInlineMarkdown(trimmed.replace(/^>\s+/, ""))}</blockquote>`;
+    } else if (trimmed === "") {
+      html += "<br/>";
+    } else {
+      html += `<p>${parseInlineMarkdown(trimmed)}</p>`;
+    }
+  });
+
+  flushList();
+  return html;
+};
+
+const extractThinkContent = (text, message) => {
+  if (!text || !text.includes("<think>")) {
+    return text;
+  }
+
+  let remaining = text;
+  const thinkRegex = /<think>([\s\S]*?)<\/think>/gi;
+  let match;
+  while ((match = thinkRegex.exec(text)) !== null) {
+    const thinkText = match[1].trim();
+    if (thinkText) {
+      message.thinking.push({ thought: thinkText });
+    }
+    remaining = remaining.replace(match[0], "");
+  }
+  return remaining.trim();
+};
+
 const handleSend = async () => {
   if (!inputMessage.value.trim() || sending.value) return;
 
@@ -152,11 +230,9 @@ const handleSend = async () => {
     conversationId,
     message,
     (chunk) => {
-      // 收到最终消息时，清空思考过程显示
-      if (chatStore.getCurrentMessages()[messageIndex].thinking.length > 0) {
-        chatStore.getCurrentMessages()[messageIndex].thinking = [];
-      }
-      chatStore.getCurrentMessages()[messageIndex].content += chunk;
+      const assistant = chatStore.getCurrentMessages()[messageIndex];
+      const content = extractThinkContent(chunk, assistant);
+      assistant.content += content;
       scrollToBottom();
     },
     (thoughtData) => {
@@ -310,6 +386,46 @@ const handleSend = async () => {
         border-radius: 8px;
         line-height: 1.6;
         word-wrap: break-word;
+
+        h1, h2, h3, h4, h5, h6 {
+          margin: 12px 0 8px;
+          color: #303133;
+        }
+
+        p {
+          margin: 8px 0;
+        }
+
+        ul,
+        ol {
+          margin: 8px 0 8px 20px;
+        }
+
+        li {
+          margin-bottom: 4px;
+        }
+
+        a {
+          color: #409eff;
+          text-decoration: underline;
+        }
+
+        code {
+          display: inline-block;
+          padding: 2px 6px;
+          margin: 0 2px;
+          background: #f5f7fa;
+          border-radius: 4px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+
+        blockquote {
+          margin: 10px 0;
+          padding: 10px 14px;
+          border-left: 4px solid #dcdfe6;
+          background: #f2f6fc;
+          color: #606266;
+        }
       }
     }
   }
