@@ -1,0 +1,9 @@
+[project]
+name = "eventhorizon"
+version = "0.1.0"
+description = "EventHorizon 核心底座：事件驱动的文字修仙游戏引擎（见 ARCHITECTURE.md）"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["eventhorizon"]
+testpaths = ["tests"]
