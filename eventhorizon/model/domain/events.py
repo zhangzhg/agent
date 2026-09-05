@@ -70,6 +70,22 @@ class GameEventDef:
     is_draft: bool = False
     is_command: bool = False  # True=命令型（eat/move），False=第二段奇遇
 
+    predicate_text: str = ""
+    # 自然语言触发条件（用户显式选择：用向量相似度比较代替结构化谓词比较，接受
+    # 模糊匹配的代价——见 README 1.4.1 原本"补盲区、不替代规则"的定位，这里是一次
+    # 有意识的偏离）。跟 predicate 互不冲突：predicate 非空时优先按它做精确判定
+    # （硬条件，如 money_gte 这类不能模糊的），predicate 为空且 predicate_text 非空
+    # 时才走 matching.py 里的向量相似度判定；两个都空 = 无条件。
+    predicate_embedding: tuple[float, ...] = ()
+    # 录入（保存）时用 EmbeddingPort 预计算并缓存，不在每次触发时现场编码
+    # predicate_text（README 1.4.1："事件 embedding 在录入时预计算并缓存"）。
+
+    result_text: str = ""
+    # 自然语言的"结果"描述（编辑器用它替代手填 result_pool JSON）。保存时若能解析
+    # 出明确的数值得失，会同步写进 result_pool 参与真实结算；result_text 本身只是
+    # 给人看的描述，不参与运行时判定——跟 predicate_text 不同，没有对应的"运行时
+    # 用文字本身做判断"的机制。
+
     @property
     def needs_reply(self) -> bool:
         return bool(self.reply_options) or self.scenario_ref is not None

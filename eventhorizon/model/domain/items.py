@@ -21,6 +21,12 @@ class ItemDef:
     unique: bool = False
     name: str = ""
     description: str = ""  # 背包面板"点击查看物品描述"用（GAME_DESIGN §2.6）
+    embedding: tuple[float, ...] = ()
+    # name+description 的向量，录入（保存物品）时预计算并缓存——事件"结果"文字描述
+    # 提到"获得某样东西"时，拿这个跟描述的向量比对，找出语义最接近的真实物品
+    # （model/services/item_embedding_match.py），而不是让 AI 自己编一个 item_id
+    # （十有八九是悬空引用）。跟 predicate_embedding 一样，只在录入时算一次，不在
+    # 每次触发时现场编码全库。
 
 
 @dataclass(slots=True)

@@ -3,6 +3,15 @@ name = "eventhorizon"
 version = "0.1.0"
 description = "EventHorizon 核心底座：事件驱动的文字修仙游戏引擎（见 ARCHITECTURE.md）"
 requires-python = ">=3.11"
+# Web（controller/web_controller.py + view/web/*）是核心底座的一个入口，不是外挂的
+# 可选组件——跟 CLI 入口一样，装好这一个项目就都能跑，不用另外单独装。httpx 是
+# starlette.testclient.TestClient（admin/web 路由测试用）的运行时依赖。
+dependencies = [
+    "fastapi>=0.100",
+    "uvicorn>=0.22",
+    "httpx>=0.24",
+    "jinja2>=3.1",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["eventhorizon"]

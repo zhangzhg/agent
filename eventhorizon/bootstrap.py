@@ -33,6 +33,8 @@ from model.services.handlers.result_pool_executor import ResultPoolExecutor
 from model.services.handlers.time_pass_handler import TimePassHandler
 from model.services.pipeline import default_pipeline
 from model.services.play_turn import PlayTurnService
+from model.services.live_narrative_writer import LlmClient
+from model.services.ports import EmbeddingPort
 
 
 @dataclass
@@ -65,7 +67,13 @@ class AppContext:
     balance: BalanceTable
 
 
-def build_app(db_path: str = ":memory:", seed_time: GameTime | None = None, rng_seed: int | None = None) -> AppContext:
+def build_app(
+    db_path: str = ":memory:",
+    seed_time: GameTime | None = None,
+    rng_seed: int | None = None,
+    embedding: "EmbeddingPort | None" = None,
+    narrative_writer: "LlmClient | None" = None,
+) -> AppContext:
     # check_same_thread=False：FastAPI 把同步路由丢进线程池执行，不同请求可能落
     # 在不同线程上（哪怕从不真正并发），sqlite3 默认的单线程校验会直接报错。单机
     # 单玩家场景不会有真正的并发写，这里放开检查是安全的简化（README 1.1 产品边界）。
@@ -93,7 +101,8 @@ def build_app(db_path: str = ":memory:", seed_time: GameTime | None = None, rng_
     retreat = RetreatService(clock, balance, rng, log=logs)
 
     play_turn = PlayTurnService(
-        bus, arbiter, pipeline, parser, events, scenarios, rng, logs, clock, retreat=retreat, balance=balance
+        bus, arbiter, pipeline, parser, events, scenarios, rng, logs, clock,
+        retreat=retreat, balance=balance, embedding=embedding, narrative_writer=narrative_writer,
     )
 
     world_view = world_repo.assemble_view()

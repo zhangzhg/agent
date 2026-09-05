@@ -1,0 +1,1426 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>太一仙途 · 录入编辑器</title>
+<link rel="stylesheet" href="/static/theme.css" />
+<style>
+  body {
+    display: flex;
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    overflow: hidden;
+  }
+  html { overflow: hidden; }
+
+  /* ---------- 左侧菜单 ---------- */
+  /* #sidebar/#content 各自用自己的滚动条撑满视口高度：html/body 设 overflow:hidden
+     防止出现"外层文档 + 内层面板"两条纵向滚动条的双滚动条问题；min-height:0 是
+     flex 子项的防御性写法——没有它，子项在内容变高（比如新的地点详情表单+关联
+     事件列表）时可能不老实地按 height 收着滚，而是把自己撑高顶穿容器。 */
+  #sidebar {
+    width: 200px; flex-shrink: 0; background: var(--sidebar-bg);
+    border-right: 1px solid var(--border); height: 100vh; min-height: 0; overflow-y: auto;
+    box-shadow: var(--shadow-md);
+  }
+  #sidebar .brand {
+    padding: 18px 16px 14px; border-bottom: 1px solid var(--border);
+    color: var(--accent); font-weight: bold; font-size: 15px; letter-spacing: 0.5px;
+  }
+  #sidebar .brand small { display: block; color: var(--text-dim); font-weight: normal; font-size: 11px; margin-top: 3px; letter-spacing: 0; }
+  .menu-group { padding: 10px 0; border-bottom: 1px solid var(--border-soft); }
+  .menu-group-title {
+    padding: 4px 16px; color: var(--text-faint); font-size: 11px;
+    letter-spacing: 1px; text-transform: uppercase;
+  }
+  .menu-item {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    color: var(--text); padding: 9px 16px 9px 24px; cursor: pointer; font-size: 13px;
+    border-left: 2px solid transparent; transition: background 0.12s ease, color 0.12s ease;
+  }
+  .menu-item:hover { background: var(--bg-elevated); }
+  .menu-item.active { background: var(--accent-soft); border-left-color: var(--accent); color: var(--accent-strong); }
+
+  /* ---------- 右侧内容 ---------- */
+  #content { flex: 1; min-width: 0; min-height: 0; height: 100vh; overflow-y: auto; overflow-x: hidden; padding: 20px 26px; }
+  .pane { display: none; }
+  .pane.active { display: block; }
+  .pane > h2 { margin: 0 0 16px; font-size: 17px; color: var(--accent); font-weight: 600; letter-spacing: 0.3px; }
+  .cols { display: flex; gap: 16px; align-items: flex-start; }
+  .col { flex: 1; min-width: 0; }
+  /* 地图编辑器/物品/事件三个页面都高度撑满可用空间：每页的 .cols 拉伸到
+     #content 的整高，两列（画布+面板、列表+表单）都拉伸到 .cols 的整高，不再
+     各自按内容多少决定高度、也不再靠固定像素/vh 凑数——h2/工具栏/提示条这些按
+     自身内容高度，剩下的空间全部分给 .cols。 */
+  #pane-mapeditor.active, #pane-items.active, #pane-events.active {
+    display: flex; flex-direction: column; height: 100%;
+  }
+  #pane-mapeditor.active > h2, #pane-items.active > h2, #pane-events.active > h2,
+  #pane-mapeditor.active #map-toolbar, #pane-mapeditor.active #map-hint { flex-shrink: 0; }
+  #pane-mapeditor.active > .cols, #pane-items.active > .cols, #pane-events.active > .cols {
+    flex: 1; min-height: 0; align-items: stretch;
+  }
+  #pane-mapeditor.active > .cols > .col, #pane-items.active > .cols > .col, #pane-events.active > .cols > .col {
+    min-height: 0; display: flex; flex-direction: column;
+  }
+  /* 物品/事件页的左侧列表、事件页的表单列：条目/表单一多整页会被顶得很长。这两个
+     类现在是"撑满自己所在列剩下的高度、自己滚"，不再是固定 vh 上限——具体高度由
+     上面那组 .col 拉伸规则给出，这里只管 flex:1 吃满 + 出现溢出时自己出滚动条。 */
+  .scroll-list {
+    flex: 1; min-height: 0; overflow-y: auto; border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0 8px; background: var(--panel-bg); box-shadow: var(--shadow-sm);
+  }
+  .scroll-list table { margin-bottom: 0; }
+  .scroll-list th { position: sticky; top: 0; background: var(--panel-bg); }
+  .scroll-panel { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; }
+
+  tr.row-selected td { background: var(--info-soft); border-left: 2px solid var(--info); }
+
+  .row2 { display: flex; gap: 10px; }
+  .row2 > div { flex: 1; }
+  #event-search { margin-bottom: 8px; }
+  pre.result {
+    background: var(--bg-elevated); border: 1px solid var(--border); padding: 10px; border-radius: var(--radius);
+    overflow-x: auto; font-size: 12px; line-height: 1.6;
+  }
+
+  /* ---------- 地图编辑器 ---------- */
+  #map-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  #map-breadcrumb { font-size: 13px; color: var(--text-dim); }
+  #map-breadcrumb button {
+    background: none; border: none; color: var(--accent); cursor: pointer; padding: 0 3px; font-size: 13px;
+    font-family: inherit; text-decoration: underline;
+  }
+  #map-breadcrumb button:last-child, #map-breadcrumb span.current { color: var(--text); text-decoration: none; cursor: default; }
+  /* flex:1 撑满这一列剩下的高度；min-height 兜个底，防止窗口很矮时被压成一条缝——
+     实际可用高度由 JS 的 resizeCanvasToFit() 读出来，同步进 viewBox，画布坐标系
+     跟着变，不是简单拉伸 SVG 导致节点圆变形。 */
+  #map-canvas-wrap { flex: 1; min-height: 260px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-bg); box-shadow: var(--shadow-sm); overflow: hidden; }
+  #map-canvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  #map-canvas .node-circle { fill: var(--accent); stroke: var(--bg); stroke-width: 1.5; cursor: grab; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.4)); }
+  #map-canvas .node-circle.hidden-loc { fill: var(--sidebar-bg); stroke: var(--draft); stroke-dasharray: 3 2; }
+  #map-canvas .node-circle.selected { stroke: #fff; stroke-width: 2.5; }
+  #map-canvas .node-circle.connect-first { stroke: var(--ok); stroke-width: 2.5; }
+  #map-canvas .node-label { fill: var(--text); font-size: 11px; font-family: inherit; pointer-events: none; }
+  #map-canvas .route-line { stroke: var(--text-faint); stroke-width: 1.5; }
+  #map-canvas .route-line.one-way { stroke-dasharray: 4 3; }
+  #map-canvas .node-delete-btn { cursor: pointer; }
+  #map-canvas .node-delete-btn circle { fill: var(--bad); stroke: var(--bg); stroke-width: 1; }
+  #map-canvas .node-delete-btn text { fill: #1a1712; font-size: 12px; font-weight: bold; pointer-events: none; }
+  #map-hint { font-size: 11px; color: var(--text-dim); margin: 6px 0 10px; }
+  .list-header { display: flex; justify-content: space-between; align-items: center; margin: 4px 0 6px; }
+  .list-header h3 { margin: 0; font-size: 13px; color: var(--text-dim); font-weight: 600; }
+  /* 地点/路线列表各占一半高度、各自滚动：整体跟左边画布（480px）对齐，不会因为
+     其中一个列表条目多就把另一个挤出视野，也不会无限长下去靠外层 #content 滚。 */
+  #panel-list-view { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+  .list-half { flex: 1 1 50%; min-height: 0; display: flex; flex-direction: column; }
+  .list-half .list-header { flex-shrink: 0; }
+  .list-half .scroll-list { flex: 1; min-height: 0; max-height: none; }
+  #map-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; font-size: 11px; color: var(--text-dim); }
+  .legend-item { display: flex; align-items: center; gap: 4px; }
+  .legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; box-shadow: 0 0 0 1px rgba(0,0,0,0.3); }
+  .related-event-row { padding: 4px 0; border-bottom: 1px solid var(--border-soft); font-size: 12px; }
+  .related-event-row:last-child { border-bottom: none; }
+  .gen-kind-grid { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 4px 0 8px; }
+  .gen-kind-grid label { display: flex; align-items: center; gap: 4px; margin: 0; color: var(--text); font-size: 13px; }
+  .gen-kind-grid input { width: auto; }
+
+  /* ---------- 右侧属性面板：地点/路线列表 <-> 详情表单，同一块地方切换，不弹窗 ---------- */
+  .modal-footer { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  /* 事件页 保存草稿/发布/撤回为草稿/删除 四个按钮：2x2 网格分两行放，比一行挤四个
+     或自动换行更整齐，也不会因为列宽变化忽宽忽窄。 */
+  .event-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .event-actions .btn { margin: 0; }
+  @media (max-width: 720px) {
+    /* 窄屏堆叠成单列：两块各自的内部滚动条体验很差（手指划一下不知道滚的是哪
+       块），改回让外层文档本身滚动。 */
+    html, body { overflow: auto; }
+    body { flex-direction: column; }
+    #sidebar { width: 100%; height: auto; min-height: 0; overflow-y: visible; box-shadow: none; }
+    #content { height: auto; min-height: 0; overflow-y: visible; }
+  }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <div class="brand">太一仙途<small>录入编辑器</small></div>
+  <div class="menu-group">
+    <div class="menu-group-title">地图管理</div>
+    <button class="menu-item active" data-pane="mapeditor">地图编辑器</button>
+  </div>
+  <div class="menu-group">
+    <div class="menu-group-title">内容管理</div>
+    <button class="menu-item" data-pane="items">物品</button>
+    <button class="menu-item" data-pane="events">事件</button>
+  </div>
+  <div class="menu-group">
+    <div class="menu-group-title">工具</div>
+    <button class="menu-item" data-pane="simulate">模拟触发</button>
+  </div>
+</aside>
+
+<div id="content">
+
+<!-- ===================== 地图编辑器 ===================== -->
+<div class="pane active" id="pane-mapeditor">
+  <h2>地图编辑器</h2>
+  <div id="map-toolbar">
+    <span id="map-breadcrumb"></span>
+    <button class="btn secondary toggled" id="mode-select-btn" onclick="setMapMode('select')">选择</button>
+    <button class="btn secondary" id="mode-add-btn" onclick="setMapMode('add')">+ 添加地点</button>
+    <button class="btn secondary" id="mode-connect-btn" onclick="setMapMode('connect')">连接路线</button>
+    <button class="btn secondary" onclick="showGenerateView()">AI 生成</button>
+  </div>
+  <div id="map-hint">
+    点节点选中，右侧显示详情；拖拽节点调整位置；双击节点下钻进入其内部子图；点空白处取消选中。
+  </div>
+  <div class="cols">
+    <div class="col" style="flex: 2;">
+      <div id="map-canvas-wrap">
+        <svg id="map-canvas" viewBox="0 0 900 480"></svg>
+      </div>
+      <div id="map-legend"></div>
+    </div>
+    <div class="col" id="map-side-panel">
+      <!-- 浏览态：当前层级的地点/路线列表——各占一半高度，各自滚动，不会一个列表
+           太长就把另一个挤出视野。 -->
+      <div id="panel-list-view">
+        <div class="list-half">
+          <div class="list-header"><h3>地点列表（当前层级）</h3><button class="btn secondary" onclick="setMapMode('add')">+ 新建</button></div>
+          <div class="scroll-list">
+            <table id="location-table"><thead>
+              <tr><th>ID</th><th>名称</th><th>类型</th><th></th></tr>
+            </thead><tbody></tbody></table>
+          </div>
+        </div>
+        <div class="list-half">
+          <div class="list-header"><h3>路线列表（当前层级）</h3><button class="btn secondary" onclick="setMapMode('connect')">+ 新建</button></div>
+          <div class="scroll-list">
+            <table id="route-table"><thead>
+              <tr><th>起点</th><th>终点</th><th>耗时</th><th>双向</th><th></th></tr>
+            </thead><tbody></tbody></table>
+          </div>
+        </div>
+      </div>
+
+      <!-- 详情态：选中一个地点后，就地编辑，不弹窗 -->
+      <div id="panel-loc-view" style="display:none">
+        <div class="list-header"><h3 id="loc-panel-title">编辑地点</h3><button class="btn secondary" onclick="showListView()">← 返回列表</button></div>
+        <label>location_id</label><input type="text" id="loc-id" />
+        <label>名称</label><input type="text" id="loc-name" />
+        <div class="row2">
+          <div><label>kind</label>
+            <select id="loc-kind">
+              <option value="城市">城市</option><option value="荒野">荒野</option>
+              <option value="洞府">洞府</option><option value="集市">集市</option>
+              <option value="山门">山门</option><option value="遗迹">遗迹</option>
+              <option value="秘境">秘境</option>
+            </select>
+          </div>
+          <div><label>location_type（粗筛匹配键）</label><input type="text" id="loc-type" /></div>
+        </div>
+        <div class="row2">
+          <div><label>灵气浓度</label><input type="number" step="0.1" id="loc-qi" value="1.0" /></div>
+          <div><label>危险等级</label><input type="number" step="0.1" id="loc-danger" value="0" /></div>
+        </div>
+        <div class="row2">
+          <div><label>condition</label>
+            <select id="loc-condition">
+              <option value="完好">完好</option><option value="废墟">废墟</option><option value="秘境开启">秘境开启</option>
+            </select>
+          </div>
+          <div><label>父地点（新建时自动填入当前层级）</label><input type="text" id="loc-parent" readonly /></div>
+        </div>
+        <div class="row2">
+          <div><label>x 坐标</label><input type="number" id="loc-x" value="0" /></div>
+          <div><label>y 坐标</label><input type="number" id="loc-y" value="0" /></div>
+        </div>
+        <div class="checkbox-line"><input type="checkbox" id="loc-hidden" /><label style="margin:0">隐藏点位（需神识扫描发现）</label></div>
+        <div class="row2">
+          <div><label>隐蔽度（0~1）</label><input type="number" step="0.05" id="loc-concealment" value="0" /></div>
+          <div class="checkbox-line" style="margin-top:22px"><input type="checkbox" id="loc-discovered" /><label style="margin:0">已发现</label></div>
+        </div>
+        <div class="errors" id="loc-errors"></div>
+        <fieldset>
+          <legend>关联事件（只读，按 location_type 匹配已发布事件）</legend>
+          <div id="loc-related-events"></div>
+        </fieldset>
+        <div class="modal-footer">
+          <button class="btn" onclick="saveLocation()">保存</button>
+          <button class="btn danger" id="loc-delete-btn" onclick="deleteLocation(mapSelectedId)" style="display:none">删除此地点</button>
+        </div>
+      </div>
+
+      <!-- 详情态：选中/新建一条路线 -->
+      <div id="panel-route-view" style="display:none">
+        <div class="list-header"><h3 id="route-panel-title">编辑路线</h3><button class="btn secondary" onclick="showListView()">← 返回列表</button></div>
+        <div class="row2">
+          <div><label>起点 id</label><input type="text" id="route-from" readonly /></div>
+          <div><label>终点 id</label><input type="text" id="route-to" readonly /></div>
+        </div>
+        <div class="row2">
+          <div><label>耗时（时辰）</label><input type="number" id="route-cost" value="1" /></div>
+          <div class="checkbox-line" style="margin-top:22px"><input type="checkbox" id="route-bidir" checked /><label style="margin:0">双向</label></div>
+        </div>
+        <div class="errors" id="route-errors"></div>
+        <div class="modal-footer">
+          <button class="btn" onclick="saveRoute()">保存</button>
+          <button class="btn danger" id="route-delete-btn" onclick="deleteRoute($('route-from').value, $('route-to').value)">删除</button>
+        </div>
+      </div>
+
+      <!-- AI 生成：批量按类型/数量随机生成地点（+ 可选自动连成网状路线），落在当前层级 -->
+      <div id="panel-generate-view" style="display:none">
+        <div class="list-header"><h3>AI 生成地点</h3><button class="btn secondary" onclick="showListView()">← 返回列表</button></div>
+        <label>地点类型（可多选）</label>
+        <div class="gen-kind-grid" id="gen-kind-grid"></div>
+        <label>数量</label><input type="number" id="gen-count" value="5" min="1" max="40" />
+        <div class="checkbox-line"><input type="checkbox" id="gen-connect" checked /><label style="margin:0">自动连成网状路线（含与当前层级已有地点搭一条桥）</label></div>
+        <div class="hint">名称优先由 AI 生成（需配置 eventhorizon/llm_config.json），不可用时自动用本地词库随机补齐；灵气浓度/危险等级始终按类型区间随机取。地点落在当前层级（<span id="gen-level-hint">顶层</span>），位置由画布自动摊开、不重叠，生成后仍可在列表里逐个编辑。</div>
+        <div class="errors" id="gen-errors"></div>
+        <div class="ok-msg" id="gen-status"></div>
+        <div class="modal-footer">
+          <button class="btn" id="gen-run-btn" onclick="runGenerateLocations()">生成</button>
+          <button class="btn secondary" onclick="showListView()">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 物品 ===================== -->
+<div class="pane" id="pane-items">
+  <h2>物品</h2>
+  <div class="cols">
+    <div class="col">
+      <div class="scroll-list">
+        <table id="item-table"><thead>
+          <tr><th>ID</th><th>名称</th><th>类型</th><th>描述</th><th></th></tr>
+        </thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="col scroll-panel">
+      <fieldset>
+        <legend>AI 生成物品</legend>
+        <label>物品类型（可多选，留空则不限定类型，AI 在全部类型里自由发挥）</label>
+        <div class="gen-kind-grid" id="item-gen-kind-grid"></div>
+        <div class="row2">
+          <div><label>参考小说（可选，如：凡人修仙传）</label><input type="text" id="item-gen-novel" placeholder="留空则不特别参考某部小说的风格" /></div>
+          <div><label>数量</label><input type="number" id="item-gen-count" value="5" min="1" max="30" /></div>
+        </div>
+        <div class="hint">名称/描述全部由 AI 生成（需配置 eventhorizon/llm_config.json，不可用时会报错，不用本地词库凑数）；填了参考小说，AI 会模仿它的世界观和命名风格，但名称是原创的，不会照抄书里的专有物品名。可堆叠/唯一按类型套固定规则，生成后仍可在列表里逐个编辑。</div>
+        <div class="errors" id="item-gen-errors"></div>
+        <div class="ok-msg" id="item-gen-status"></div>
+        <button class="btn secondary" id="item-gen-run-btn" onclick="runGenerateItems()">生成</button>
+      </fieldset>
+      <fieldset>
+        <legend>新增 / 编辑物品</legend>
+        <label>item_id</label><input type="text" id="item-id" />
+        <label>名称</label><input type="text" id="item-name" />
+        <label>kind</label>
+        <select id="item-kind">
+          <option value="food">food 食物</option><option value="pill">pill 丹药</option>
+          <option value="manual">manual 秘籍</option><option value="material">material 材料</option>
+          <option value="gear">gear 装备</option>
+        </select>
+        <label>描述</label><textarea id="item-desc"></textarea>
+        <div class="checkbox-line"><input type="checkbox" id="item-stackable" checked /><label style="margin:0">可堆叠</label></div>
+        <div class="checkbox-line"><input type="checkbox" id="item-unique" /><label style="margin:0">唯一</label></div>
+        <button class="btn" onclick="saveItem()">保存物品</button>
+        <button class="btn secondary" onclick="clearItemForm()">清空</button>
+        <div class="errors" id="item-errors"></div>
+      </fieldset>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 事件 ===================== -->
+<div class="pane" id="pane-events">
+  <h2>事件</h2>
+  <div class="cols">
+    <div class="col" style="flex: 0 0 260px;">
+      <button class="btn secondary" style="margin-bottom:8px" onclick="clearEventForm()">+ 新建事件</button>
+      <input type="text" id="event-search" placeholder="搜索 event_id / 标签…" oninput="renderEventList()" />
+      <div class="scroll-list"><table><tbody id="event-list"></tbody></table></div>
+    </div>
+    <div class="col scroll-panel">
+      <fieldset>
+        <legend>AI 生成事件（可参考小说情节）</legend>
+        <label>情节描述 / 灵感来源（留空则由 AI 自由发挥）</label>
+        <textarea id="evgen-description" style="min-height:90px" placeholder="例：酒楼里有人钓到金龙鱼，围观后可买；有钱则鱼或为龙，给报酬——可以直接引用/改写小说桥段；留空就让 AI 自己构思场景"></textarea>
+        <div class="row2">
+          <div><label>适用地点类型（逗号分隔，"*" 表示任意）</label><input type="text" id="evgen-locations" value="*" /></div>
+          <div><label>数量</label><input type="number" id="evgen-count" value="3" min="1" max="10" /></div>
+        </div>
+        <div class="hint">AI 只负责标签/聊天别名/叙事文案，会参考上面的情节描述——留空的话由 AI 自己构思一个合适的场景；权重/冷却/触发条件等机制字段由程序填安全默认值。生成的都是草稿，进左侧列表后可逐条检查/编辑/发布，不会直接进合格池。需要先配置 eventhorizon/llm_config.json。</div>
+        <div class="errors" id="evgen-errors"></div>
+        <div class="ok-msg" id="evgen-status"></div>
+        <button class="btn secondary" id="evgen-run-btn" onclick="runGenerateEvents()">生成</button>
+      </fieldset>
+
+      <fieldset>
+        <legend>基础信息</legend>
+        <div class="row2">
+          <div><label>event_id</label><input type="text" id="ev-id" /></div>
+          <div><label>优先级 priority</label><input type="number" id="ev-priority" value="5" /></div>
+        </div>
+        <label>适用地点类型（逗号分隔，"*" 表示任意）</label><input type="text" id="ev-locations" value="*" />
+        <label>适用时辰（逗号分隔的 0-11，留空=任意）</label><input type="text" id="ev-time" />
+        <div class="row2">
+          <div><label>权重 weight</label><input type="number" step="0.1" id="ev-weight" value="1.0" /></div>
+          <div><label>持续时辰 duration_shichen</label><input type="number" id="ev-duration" value="1" /></div>
+        </div>
+        <div class="row2">
+          <div><label>冷却时辰 cooldown_shichen</label><input type="number" id="ev-cooldown" value="0" /></div>
+          <div><label>最大触发次数（留空=不限）</label><input type="number" id="ev-max-trigger" /></div>
+        </div>
+        <label>标签 tags（逗号分隔，如 生活,奇遇）</label><input type="text" id="ev-tags" />
+        <label>互斥标签 exclusive_tags（逗号分隔）</label><input type="text" id="ev-exclusive" />
+        <label>聊天别名 aliases（逗号分隔，命令型事件用）</label><input type="text" id="ev-aliases" />
+        <label>scenario_ref（可选，绑定的流程图 id）</label><input type="text" id="ev-scenario-ref" />
+        <div class="checkbox-line"><input type="checkbox" id="ev-is-command" /><label style="margin:0">命令型事件（is_command）</label></div>
+        <div class="checkbox-line"><input type="checkbox" id="ev-is-draft" checked /><label style="margin:0">草稿（不进合格池）</label></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>触发条件（文字描述，留空 = 无条件）</legend>
+        <textarea id="ev-predicate-text" placeholder="例：玩家境界至少到金丹期；或：深夜且身上带着足够的银两"></textarea>
+        <div class="hint" id="ev-predicate-old-hint" style="display:none">此事件带有旧版精确谓词（结构化条件），仍按原样精确生效；这里的文字描述暂不会覆盖它——如需改用文字描述判定，请联系开发把旧谓词清空。</div>
+        <div class="hint">保存时会把这段话转成向量，运行时跟当前情境做相似度比较——不是精确匹配，判定结果可能跟字面意思有出入；需要 100% 精确（比如"至少 5 两银子"这种硬条件）建议还是用旧版结构化谓词。需要配置 eventhorizon/llm_config.json 的 embedding_model 才会真正生效，没配置时这段描述只是文字，不会拦事件。</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>结果（文字描述）</legend>
+        <textarea id="ev-result-text" placeholder="例：花费五两银子买下了金龙鱼；或：修为略有精进"></textarea>
+        <div class="hint" id="ev-result-old-hint" style="display:none">此事件已经有结构化结果池（AI 生成或旧版数据），这里留空时会保留原样；一旦填了文字描述，保存时会尝试解析出其中的数值得失并整体替换掉原有的结果池。</div>
+        <div class="hint">保存时会尝试从这段话里提取明确的数值得失（金钱/饱食/修为/心魔），写成真正的游戏效果；提取不出来或没配置 LLM 时只当描述文字存着，不影响保存。</div>
+      </fieldset>
+
+      <div class="hint" id="ev-variants-hint" style="display:none">此事件已有文案变体（AI 生成或旧版数据），保留不动；这里不提供编辑，触发时若为空会由 LLM 现场补一句叙事并存回。</div>
+      <div class="hint" id="ev-reply-hint" style="display:none">此事件已有局部选项（needs_reply，旧版数据），保留不动，这里不提供编辑。</div>
+
+      <div class="event-actions">
+        <button class="btn" onclick="saveEvent()">保存草稿</button>
+        <button class="btn" onclick="publishEvent()">发布</button>
+        <button class="btn secondary" onclick="unpublishEvent()">撤回为草稿</button>
+        <button class="btn danger" onclick="deleteEvent()">删除</button>
+      </div>
+      <div class="errors" id="ev-errors"></div>
+      <div class="ok-msg" id="ev-ok"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 模拟触发 ===================== -->
+<div class="pane" id="pane-simulate">
+  <h2>模拟触发沙盒</h2>
+  <div class="cols">
+    <div class="col">
+      <fieldset>
+        <legend>测试参数</legend>
+        <label>event_id</label><input type="text" id="sim-event-id" placeholder="要测试的事件 id" />
+        <label>测试快照 context_snapshot（JSON）</label>
+        <textarea id="sim-snapshot" placeholder='{"地点类型":"酒楼","境界":"凡人","金钱":10,"年龄":20}'></textarea>
+        <div class="row2">
+          <div><label>抽样次数</label><input type="number" id="sim-n" value="100" /></div>
+          <div style="display:flex; align-items:flex-end;"><button class="btn" onclick="runSimulate()">跑一遍</button></div>
+        </div>
+      </fieldset>
+    </div>
+    <div class="col">
+      <fieldset>
+        <legend>结果</legend>
+        <pre class="result" id="sim-result">（还没跑过）</pre>
+      </fieldset>
+    </div>
+  </div>
+</div>
+
+</div><!-- #content -->
+
+<script>
+// ---------- 通用 ----------
+function $(id) { return document.getElementById(id); }
+function csvToArr(s) { return s.split(",").map(x => x.trim()).filter(Boolean); }
+function arrToCsv(a) { return (a || []).join(", "); }
+function jsonOrNull(text) {
+  const t = (text || "").trim();
+  if (!t) return null;
+  return JSON.parse(t);
+}
+async function api(method, url, body) {
+  const res = await fetch(url, {
+    method, headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok && res.status !== 200) {
+    return { ok: false, field_errors: [{ field: "http", message: data.detail || res.statusText }] };
+  }
+  return data;
+}
+function renderErrors(el, errors) {
+  el.textContent = (errors || []).map(e => `${e.field}: ${e.message}`).join("\n");
+}
+
+// ---------- 左侧菜单切换 ----------
+document.querySelectorAll(".menu-item").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".menu-item").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".pane").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    $("pane-" + btn.dataset.pane).classList.add("active");
+    // 切回地图编辑器时补一次渲染：面板隐藏期间如果窗口尺寸变了，画布撑满的目标
+    // 高度也变了，SVG 还留着上一次渲染时的旧 viewBox，不重新算一遍不会自己更新。
+    if (btn.dataset.pane === "mapeditor" && typeof renderMapCanvas === "function") renderMapCanvas();
+  });
+});
+
+// ---------- 地图（可视化编辑器，2 级下钻：顶层 <-> 子地点） ----------
+// 三种显式工具模式（选择/添加地点/连接路线），右侧固定一块"属性面板"，在"当前层级
+// 列表"和"选中项详情表单"之间切换，不弹窗——新增地点/路线也是先在画布上落点/连线，
+// 再在右侧面板里补完字段确认保存，而不是先弹一个空表单让你手填坐标。
+const SVG_NS = "http://www.w3.org/2000/svg";
+const KIND_COLORS = {
+  "城市": "#4CAF50", "荒野": "#8D6E63", "洞府": "#9C6ADE", "集市": "#42A5F5",
+  "山门": "#26A69A", "遗迹": "#8D8D8D", "秘境": "#EC407A",
+};
+let locations = [];
+let routes = [];
+let events = []; // 提前声明：地点详情面板的"关联事件"要在事件模块加载完成前就能安全引用
+let mapParentId = null;          // 当前所在层级的父 id；null = 顶层
+let mapBreadcrumbStack = [];     // [{id, name}, ...]，下钻路径
+let mapMode = "select";          // 'select' | 'add' | 'connect'
+let mapPanelState = "list";      // 'list' | 'loc' | 'route'
+let mapSelectedId = null;        // 当前选中（高亮/待编辑）的地点
+let mapSelectedRouteKey = null;  // 当前选中的路线 "from_id|to_id"
+let mapConnectFirst = null;      // 连接路线模式下先点的第一个节点
+
+function renderMapLegend() {
+  $("map-legend").innerHTML = Object.entries(KIND_COLORS).map(([k, c]) =>
+    `<span class="legend-item"><span class="legend-dot" style="background:${c}"></span>${k}</span>`).join("");
+}
+
+const MAP_HINTS = {
+  select: "点节点选中，右侧显示详情；拖拽节点调整位置；双击节点下钻进入其内部子图；点空白处取消选中。",
+  add: "在画布空白处点击以创建新地点（会落在当前层级）。",
+  connect: "依次点两个节点以创建路线；再点一次第一个节点可取消。",
+};
+function setMapMode(mode) {
+  mapMode = mode;
+  mapConnectFirst = null;
+  ["select", "add", "connect"].forEach(m => $("mode-" + m + "-btn").classList.toggle("toggled", m === mode));
+  $("map-hint").textContent = MAP_HINTS[mode];
+  renderMapCanvas();
+}
+
+async function loadMap() {
+  locations = await api("GET", "/api/admin/locations");
+  routes = await api("GET", "/api/admin/routes");
+  refreshMapView();
+}
+
+function refreshMapView() {
+  renderMapCanvas();
+  renderLocationList();
+  renderRouteTable();
+}
+
+function currentLevelLocations() {
+  return locations.filter(l => (l.parent_location_id || null) === mapParentId);
+}
+
+// 兜底网格布局：列数按节点数动态算（而不是固定 5 列），并把整张网格摊满整个画布
+// （而不是从左上角 (90,70) 按固定格距往右下堆），这样不管这一层有几个点，初始位置
+// 天然分散在整块画布里，不会挤成一小撮——resolveCollisions 只需要处理"手动拖到一起"
+// 这种真正的边缘情况，不必靠它把网格默认位置也重新推开。
+function nodePosition(loc, indexInLevel, totalInLevel) {
+  if (loc.x || loc.y) return { x: loc.x, y: loc.y };
+  const usableW = CANVAS_W - 2 * CANVAS_MARGIN, usableH = CANVAS_H - 2 * CANVAS_MARGIN;
+  const cols = Math.max(1, Math.min(6, Math.round(Math.sqrt(totalInLevel * usableW / usableH)) || 1));
+  const rows = Math.max(1, Math.ceil(totalInLevel / cols));
+  const col = indexInLevel % cols, row = Math.floor(indexInLevel / cols);
+  const x = cols > 1 ? CANVAS_MARGIN + (col * usableW) / (cols - 1) : CANVAS_W / 2;
+  const y = rows > 1 ? CANVAS_MARGIN + (row * usableH) / (rows - 1) : CANVAS_H / 2;
+  return { x, y };
+}
+
+const NODE_RADIUS = 22;
+const NODE_MIN_DISTANCE = NODE_RADIUS * 2 + 20; // 圆心最小间距：两个半径 + 一点边距，不然圆挨在一起也算"重叠"
+const CANVAS_MARGIN = 34;
+// 画布高度撑满可用空间，不再是写死的 900x480——CANVAS_W/CANVAS_H 现在是 let，
+// resizeCanvasToFit() 在每次渲染前按 #map-canvas-wrap 的实际像素尺寸重算并同步进
+// viewBox，1 个 viewBox 单位就是 1 个 CSS 像素，节点半径按窗口大小变化也不会跟着
+// 拉伸/压扁成椭圆（跟直接把 <svg> 拉伸铺满、丢给浏览器自己缩放不是一回事）。
+let CANVAS_W = 900, CANVAS_H = 480;
+function resizeCanvasToFit() {
+  const wrap = $("map-canvas-wrap");
+  const w = Math.round(wrap.clientWidth), h = Math.round(wrap.clientHeight);
+  if (w < 10 || h < 10) return; // 布局还没跑完（比如面板还没显示），先不理会，用上一次的尺寸
+  if (w === CANVAS_W && h === CANVAS_H) return;
+  CANVAS_W = w; CANVAS_H = h;
+  $("map-canvas").setAttribute("viewBox", `0 0 ${CANVAS_W} ${CANVAS_H}`);
+}
+
+// 网格兜底位置只按"当前层级第几个节点"算坐标，不知道其它节点是不是已经手动拖到了
+// 同一个格子上；手动拖拽、"添加地点"模式在画布边缘连续落点，也完全可能把两个节点
+// 放到几乎同一个点，甚至同一个角落。这里做几轮简单的圆形碰撞松弛：两个节点圆心
+// 距离小于 NODE_MIN_DISTANCE 就沿连线互相推开，直到不再重叠（或达到迭代上限）。
+function clampToCanvas(p) {
+  p.x = Math.max(CANVAS_MARGIN, Math.min(CANVAS_W - CANVAS_MARGIN, p.x));
+  p.y = Math.max(CANVAS_MARGIN, Math.min(CANVAS_H - CANVAS_MARGIN, p.y));
+}
+function resolveCollisions(posOf, ids) {
+  ids.forEach(id => clampToCanvas(posOf[id])); // 先把越界的起始点夹回画布内
+  for (let iter = 0; iter < 20; iter++) {
+    let moved = false;
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = posOf[ids[i]], b = posOf[ids[j]];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist < NODE_MIN_DISTANCE) {
+          moved = true;
+          if (dist < 0.01) {
+            // 完全重合时按 (i,j) 错开摆脱角度（黄金角式取值），让好几个重合的节点
+            // 各自往不同方向散开，不会全部只沿同一根轴推来推去、越推越乱。
+            const angle = (i * 2.399963 + j * 0.618034) * Math.PI;
+            dx = Math.cos(angle); dy = Math.sin(angle); dist = 1;
+          }
+          const push = (NODE_MIN_DISTANCE - dist) / 2;
+          const ux = dx / dist, uy = dy / dist;
+          a.x -= ux * push; a.y -= uy * push;
+          b.x += ux * push; b.y += uy * push;
+        }
+      }
+    }
+    // 每轮推开后立刻夹回画布范围——如果放到循环外最后统一夹一次，靠边/靠角的两个
+    // 节点分别被独立地按 x/y 轴夹到同一条边界甚至同一个角上，会重新叠在一起；夹完
+    // 后继续松弛才能把这种"夹出来的重叠"也推开。
+    ids.forEach(id => clampToCanvas(posOf[id]));
+    if (!moved) break;
+  }
+}
+
+function svgPoint(evt) {
+  const svg = $("map-canvas");
+  const pt = svg.createSVGPoint();
+  pt.x = evt.clientX; pt.y = evt.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+function renderBreadcrumb() {
+  let html = '<button onclick="goToMapRoot()">顶层</button>';
+  mapBreadcrumbStack.forEach((entry, i) => {
+    const isLast = i === mapBreadcrumbStack.length - 1;
+    html += " / " + (isLast
+      ? `<span class="current">${entry.name}</span>`
+      : `<button onclick="goToMapLevel(${i})">${entry.name}</button>`);
+  });
+  $("map-breadcrumb").innerHTML = html;
+}
+
+function goToMapRoot() {
+  mapBreadcrumbStack = []; mapParentId = null; mapSelectedId = null;
+  refreshMapView();
+}
+function goToMapLevel(i) {
+  const entry = mapBreadcrumbStack[i];
+  mapBreadcrumbStack = mapBreadcrumbStack.slice(0, i + 1);
+  mapParentId = entry.id; mapSelectedId = null;
+  refreshMapView();
+}
+function drillInto(loc) {
+  mapBreadcrumbStack.push({ id: loc.location_id, name: loc.name || loc.location_id });
+  mapParentId = loc.location_id; mapSelectedId = null;
+  refreshMapView();
+}
+
+function renderMapCanvas() {
+  resizeCanvasToFit();
+  renderBreadcrumb();
+  const svg = $("map-canvas");
+  svg.innerHTML = "";
+  svg.style.cursor = mapMode === "select" ? "default" : "crosshair";
+  const levelLocs = currentLevelLocations();
+  const idSet = new Set(levelLocs.map(l => l.location_id));
+  const posOf = {};
+  levelLocs.forEach((loc, i) => { posOf[loc.location_id] = nodePosition(loc, i, levelLocs.length); });
+  resolveCollisions(posOf, levelLocs.map(l => l.location_id));
+
+  for (const r of routes) {
+    if (!idSet.has(r.from_id) || !idSet.has(r.to_id)) continue;
+    const a = posOf[r.from_id], b = posOf[r.to_id];
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("x1", a.x); line.setAttribute("y1", a.y);
+    line.setAttribute("x2", b.x); line.setAttribute("y2", b.y);
+    line.setAttribute("class", "route-line" + (r.bidirectional ? "" : " one-way"));
+    svg.appendChild(line);
+  }
+
+  // 点空白处：'add' 模式落一个新点；'select' 模式取消选中；'connect' 模式点空白没有
+  // 意义，忽略。evt.target === svg 时才触发（点在节点上 target 是 circle，会被节点
+  // 自己的 click 处理器 stopPropagation 挡住，不会落到这里）。
+  svg.onclick = (evt) => {
+    if (evt.target !== svg) return;
+    if (mapMode === "add") { startNewLocation(svgPoint(evt)); return; }
+    if (mapMode === "connect") return;
+    if (mapSelectedId || mapSelectedRouteKey) showListView();
+  };
+
+  for (const loc of levelLocs) {
+    const pos = posOf[loc.location_id];
+    const circle = document.createElementNS(SVG_NS, "circle");
+    circle.setAttribute("cx", pos.x); circle.setAttribute("cy", pos.y); circle.setAttribute("r", NODE_RADIUS);
+    let cls = "node-circle";
+    if (loc.hidden) cls += " hidden-loc";
+    else circle.style.fill = KIND_COLORS[loc.kind] || "";
+    if (loc.location_id === mapSelectedId) cls += " selected";
+    if (mapMode === "connect" && loc.location_id === mapConnectFirst) cls += " connect-first";
+    circle.setAttribute("class", cls);
+
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", pos.x); label.setAttribute("y", pos.y + 36);
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("class", "node-label");
+    label.textContent = loc.name || loc.location_id;
+
+    svg.appendChild(circle); svg.appendChild(label);
+
+    circle.addEventListener("click", (evt) => { evt.stopPropagation(); onNodeClick(loc); });
+    circle.addEventListener("dblclick", (evt) => { evt.stopPropagation(); drillInto(loc); });
+    circle.addEventListener("mousedown", (evt) => startDrag(evt, loc, circle, label));
+
+    // 选中节点右上角的删除角标：不用先打开弹窗，画布上直接删。
+    if (loc.location_id === mapSelectedId) {
+      const delBtn = document.createElementNS(SVG_NS, "g");
+      delBtn.setAttribute("class", "node-delete-btn");
+      const delCircle = document.createElementNS(SVG_NS, "circle");
+      delCircle.setAttribute("cx", pos.x + 18); delCircle.setAttribute("cy", pos.y - 18); delCircle.setAttribute("r", 8);
+      const delMark = document.createElementNS(SVG_NS, "text");
+      delMark.setAttribute("x", pos.x + 18); delMark.setAttribute("y", pos.y - 14);
+      delMark.setAttribute("text-anchor", "middle");
+      delMark.textContent = "×";
+      delBtn.appendChild(delCircle); delBtn.appendChild(delMark);
+      delBtn.addEventListener("click", (evt) => { evt.stopPropagation(); deleteLocation(loc.location_id); });
+      svg.appendChild(delBtn);
+    }
+  }
+}
+
+function onNodeClick(loc) {
+  if (suppressNextClick) { suppressNextClick = false; return; }
+  if (mapMode === "connect") {
+    if (!mapConnectFirst) { mapConnectFirst = loc.location_id; renderMapCanvas(); return; }
+    if (mapConnectFirst === loc.location_id) { mapConnectFirst = null; renderMapCanvas(); return; }
+    const from_id = mapConnectFirst, to_id = loc.location_id;
+    mapConnectFirst = null;
+    setMapMode("select");
+    // 连线本身在右侧面板确认耗时/是否双向，不直接落库。
+    showRouteDetail({ from_id, to_id, move_cost_shichen: 1, bidirectional: true }, true);
+    return;
+  }
+  if (mapMode === "add") return; // 添加模式下点已有节点没有意义
+  // 左侧画布点击只负责选中/高亮，编辑内容显示在右侧属性面板里，不弹窗。
+  showLocationDetail(loc);
+}
+
+function startNewLocation(coords) {
+  setMapMode("select"); // 落一个点后自动切回选择模式，避免连续点乱建
+  showLocationDetail(null, coords);
+}
+
+let dragState = null;
+let suppressNextClick = false;  // 拖动结束后，浏览器仍会在原节点上补一个 click——
+// 用这个标记吞掉那一次，不然选中状态会被拖动前的旧数据闪一下再刷新回来。
+const DRAG_THRESHOLD = 3; // 像素；低于这个位移量按"点击"处理，不当拖动存盘
+
+function startDrag(evt, loc, circle, label) {
+  if (mapMode !== "select") return;
+  evt.preventDefault(); evt.stopPropagation();
+  const startPoint = svgPoint(evt);
+  let moved = false;
+  dragState = { loc };
+  const move = (e) => {
+    if (!dragState) return;
+    const p = svgPoint(e);
+    if (!moved && Math.hypot(p.x - startPoint.x, p.y - startPoint.y) > DRAG_THRESHOLD) moved = true;
+    circle.setAttribute("cx", p.x); circle.setAttribute("cy", p.y);
+    label.setAttribute("x", p.x); label.setAttribute("y", p.y + 36);
+    dragState.lastPoint = p;
+  };
+  const up = async () => {
+    document.removeEventListener("mousemove", move);
+    document.removeEventListener("mouseup", up);
+    if (moved && dragState && dragState.lastPoint) {
+      suppressNextClick = true;
+      const updated = Object.assign({}, dragState.loc, {
+        x: Math.round(dragState.lastPoint.x), y: Math.round(dragState.lastPoint.y),
+      });
+      await api("POST", "/api/admin/locations", updated);
+      await loadMap();
+    }
+    dragState = null;
+  };
+  document.addEventListener("mousemove", move);
+  document.addEventListener("mouseup", up);
+}
+
+function renderLocationList() {
+  const body = document.querySelector("#location-table tbody");
+  body.innerHTML = "";
+  for (const loc of currentLevelLocations()) {
+    const tr = document.createElement("tr");
+    if (loc.location_id === mapSelectedId) tr.classList.add("row-selected");
+    tr.innerHTML = `<td>${loc.location_id}</td><td>${loc.name}</td><td>${loc.location_type}</td><td></td>`;
+    const actionsTd = tr.lastElementChild;
+    const editBtn = document.createElement("button");
+    editBtn.className = "btn secondary"; editBtn.textContent = "编辑";
+    editBtn.addEventListener("click", (evt) => { evt.stopPropagation(); showLocationDetail(loc); });
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn secondary"; delBtn.textContent = "删除";
+    delBtn.addEventListener("click", (evt) => { evt.stopPropagation(); deleteLocation(loc.location_id); });
+    actionsTd.appendChild(editBtn); actionsTd.appendChild(delBtn);
+    tr.addEventListener("click", () => showLocationDetail(loc));
+    body.appendChild(tr);
+  }
+}
+
+function renderRouteTable() {
+  const idSet = new Set(currentLevelLocations().map(l => l.location_id));
+  const body = document.querySelector("#route-table tbody");
+  body.innerHTML = "";
+  for (const r of routes) {
+    if (!idSet.has(r.from_id) || !idSet.has(r.to_id)) continue;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${r.from_id}</td><td>${r.to_id}</td><td>${r.move_cost_shichen}</td><td>${r.bidirectional ? "是" : "否"}</td>` +
+      `<td><button class="btn secondary" onclick="event.stopPropagation(); deleteRoute('${r.from_id}','${r.to_id}')">删除</button></td>`;
+    tr.addEventListener("click", () => showRouteDetail(r, false));
+    body.appendChild(tr);
+  }
+}
+
+// ---------- 右侧属性面板：浏览态 <-> 地点详情 <-> 路线详情 <-> AI 生成 ----------
+function switchPanelView(which) {
+  $("panel-list-view").style.display = which === "list" ? "" : "none";
+  $("panel-loc-view").style.display = which === "loc" ? "" : "none";
+  $("panel-route-view").style.display = which === "route" ? "" : "none";
+  $("panel-generate-view").style.display = which === "generate" ? "" : "none";
+}
+
+function resetMapSelectionToList() {
+  mapPanelState = "list";
+  mapSelectedId = null; mapSelectedRouteKey = null;
+  switchPanelView("list");
+}
+
+function showListView() {
+  resetMapSelectionToList();
+  renderMapCanvas(); renderLocationList(); renderRouteTable();
+}
+
+function fillLocationForm(loc) {
+  $("loc-id").value = loc.location_id; $("loc-name").value = loc.name;
+  $("loc-kind").value = loc.kind; $("loc-type").value = loc.location_type;
+  $("loc-qi").value = loc.qi_density; $("loc-danger").value = loc.danger_level;
+  $("loc-condition").value = loc.condition; $("loc-parent").value = loc.parent_location_id || "";
+  $("loc-x").value = loc.x; $("loc-y").value = loc.y;
+  $("loc-hidden").checked = loc.hidden; $("loc-concealment").value = loc.concealment;
+  $("loc-discovered").checked = loc.discovered;
+}
+function resetLocationForm() {
+  for (const id of ["loc-id","loc-name","loc-type"]) $(id).value = "";
+  $("loc-kind").value = "城市"; $("loc-qi").value = "1.0"; $("loc-danger").value = "0";
+  $("loc-condition").value = "完好"; $("loc-hidden").checked = false;
+  $("loc-concealment").value = "0"; $("loc-discovered").checked = false;
+  $("loc-x").value = "0"; $("loc-y").value = "0";
+  $("loc-parent").value = mapParentId || "";
+  $("loc-errors").textContent = "";
+}
+
+// 只读展示——按 location_type 匹配已发布事件的 applicable_locations，不代表进入必然
+// 触发：实际触发仍是粗筛 + 谓词 + 加权随机抽取（README 1.4.2），这里只是给编辑器一个
+// "这个地点大概会撞上哪些事件"的参考视图。
+function renderRelatedEvents(loc) {
+  const box = $("loc-related-events");
+  if (!loc) { box.innerHTML = '<div class="hint">保存后可在此查看关联事件。</div>'; return; }
+  const matches = events.filter(e => !e.is_draft &&
+    (e.applicable_locations.includes("*") || e.applicable_locations.includes(loc.location_type)));
+  if (!matches.length) {
+    box.innerHTML = `<div class="hint">没有已发布事件匹配 location_type="${loc.location_type}"。</div>`;
+    return;
+  }
+  box.innerHTML = matches.map(e =>
+    `<div class="related-event-row">${e.event_id}<span class="hint">（${e.tags.join(",")}）</span></div>`).join("");
+}
+
+function showLocationDetail(loc, coords) {
+  mapPanelState = "loc";
+  mapSelectedRouteKey = null;
+  if (loc) {
+    mapSelectedId = loc.location_id;
+    fillLocationForm(loc);
+    $("loc-panel-title").textContent = "编辑地点：" + loc.location_id;
+    $("loc-id").readOnly = true;
+    $("loc-delete-btn").style.display = "";
+  } else {
+    mapSelectedId = null;
+    resetLocationForm();
+    if (coords) { $("loc-x").value = Math.round(coords.x); $("loc-y").value = Math.round(coords.y); }
+    $("loc-panel-title").textContent = "新增地点";
+    $("loc-id").readOnly = false;
+    $("loc-delete-btn").style.display = "none";
+  }
+  renderRelatedEvents(loc);
+  switchPanelView("loc");
+  renderMapCanvas(); renderLocationList();
+  if (!loc) $("loc-id").focus();
+}
+
+async function saveLocation() {
+  const dto = {
+    location_id: $("loc-id").value.trim(), name: $("loc-name").value.trim(),
+    kind: $("loc-kind").value, location_type: $("loc-type").value.trim(),
+    qi_density: parseFloat($("loc-qi").value) || 0, danger_level: parseFloat($("loc-danger").value) || 0,
+    condition: $("loc-condition").value, parent_location_id: $("loc-parent").value.trim() || null,
+    x: parseFloat($("loc-x").value) || 0, y: parseFloat($("loc-y").value) || 0,
+    hidden: $("loc-hidden").checked, concealment: parseFloat($("loc-concealment").value) || 0,
+    discovered: $("loc-discovered").checked,
+  };
+  if (!dto.location_id || !dto.location_type) {
+    renderErrors($("loc-errors"), [{ field: "location_id/location_type", message: "必填" }]);
+    return;
+  }
+  const resp = await api("POST", "/api/admin/locations", dto);
+  renderErrors($("loc-errors"), resp.field_errors);
+  if (resp.ok) {
+    resetMapSelectionToList();
+    await loadMap();
+  }
+}
+
+async function deleteLocation(id) {
+  if (!id) return;
+  if (!confirm(`删除地点 ${id}？相关路线也会一并删除。`)) return;
+  await api("DELETE", `/api/admin/locations/${encodeURIComponent(id)}`);
+  resetMapSelectionToList();
+  await loadMap();
+}
+
+// ---------- 路线详情 ----------
+function showRouteDetail(route, isNew) {
+  mapPanelState = "route";
+  mapSelectedId = null;
+  mapSelectedRouteKey = route.from_id + "|" + route.to_id;
+  $("route-from").value = route.from_id; $("route-to").value = route.to_id;
+  $("route-cost").value = route.move_cost_shichen; $("route-bidir").checked = route.bidirectional;
+  $("route-panel-title").textContent = isNew ? "新增路线" : `路线：${route.from_id} → ${route.to_id}`;
+  $("route-errors").textContent = "";
+  $("route-delete-btn").style.display = isNew ? "none" : "";
+  switchPanelView("route");
+  renderMapCanvas();
+}
+
+async function saveRoute() {
+  const dto = {
+    from_id: $("route-from").value.trim(), to_id: $("route-to").value.trim(),
+    move_cost_shichen: parseInt($("route-cost").value) || 0, bidirectional: $("route-bidir").checked,
+  };
+  const resp = await api("POST", "/api/admin/routes", dto);
+  renderErrors($("route-errors"), resp.field_errors);
+  if (resp.ok) { resetMapSelectionToList(); await loadMap(); }
+}
+
+async function deleteRoute(from_id, to_id) {
+  await api("DELETE", `/api/admin/routes?from_id=${encodeURIComponent(from_id)}&to_id=${encodeURIComponent(to_id)}`);
+  resetMapSelectionToList();
+  await loadMap();
+}
+
+// ---------- AI 生成：按类型/数量批量生成地点，可选自动连成网状路线 ----------
+// 起名字先调后端 /api/admin/generate_locations（真调 LlmLocationAuthor，见
+// controller/admin_controller.py + model/repositories/llm/），配置在
+// eventhorizon/llm_config.json；没配置、网络失败、或模型没给够数量时，用下面这套
+// 本地词库随机生成兜底补齐——保证这个功能任何时候都能用，不因为 LLM 不可用就整个
+// 罢工。灵气浓度/危险等级这些数值型属性一直都是本地按 kind 区间随机取，不让模型编
+// （游戏平衡参数，见 llm_location_author.py 顶部说明）。
+const GEN_NAME_BANK = {
+  "城市": { prefixes: ["苍梧", "云归", "天启", "龙渊", "凤鸣", "青玄", "紫霄", "白露", "临江", "望北"], suffixes: ["城", "镇"] },
+  "荒野": { prefixes: ["黑风", "幽冥", "枯木", "寒潭", "乱石", "鬼哭", "断肠", "荒芜"], suffixes: ["谷", "林", "荒原", "滩", "岭"] },
+  "洞府": { prefixes: ["紫云", "青灵", "玄天", "太乙", "混元", "碧落"], suffixes: ["洞府", "仙府", "洞天"] },
+  "集市": { prefixes: ["百草", "聚宝", "通天", "望江", "云集", "百工"], suffixes: ["集市", "坊市", "墟市"] },
+  "山门": { prefixes: ["藏剑", "天音", "剑气", "青云", "落霞", "玄天"], suffixes: ["山门", "宗", "峰"] },
+  "遗迹": { prefixes: ["上古", "荒古", "残破", "断魂", "无名", "焚天"], suffixes: ["遗迹", "废墟", "故城"] },
+  "秘境": { prefixes: ["归墟", "混沌", "九幽", "太虚", "洪荒", "空冥"], suffixes: ["秘境", "秘地", "仙域"] },
+};
+const GEN_QI_RANGE = { "城市": [0.2, 0.5], "荒野": [0.3, 0.6], "洞府": [0.6, 0.9], "集市": [0.2, 0.4], "山门": [0.5, 0.8], "遗迹": [0.4, 0.7], "秘境": [0.7, 1.0] };
+const GEN_DANGER_RANGE = { "城市": [0, 0.1], "荒野": [0.3, 0.7], "洞府": [0.1, 0.3], "集市": [0, 0.1], "山门": [0.1, 0.3], "遗迹": [0.4, 0.8], "秘境": [0.5, 0.9] };
+const GEN_KINDS = ["城市", "荒野", "洞府", "集市", "山门", "遗迹", "秘境"];
+
+function renderGenKindGrid() {
+  const grid = $("gen-kind-grid");
+  grid.innerHTML = GEN_KINDS.map(k =>
+    `<label><input type="checkbox" class="gen-kind" value="${k}" checked />${k}</label>`).join("");
+}
+
+function showGenerateView() {
+  setMapMode("select");
+  mapPanelState = "generate";
+  mapSelectedId = null; mapSelectedRouteKey = null;
+  $("gen-level-hint").textContent = mapBreadcrumbStack.length
+    ? mapBreadcrumbStack[mapBreadcrumbStack.length - 1].name : "顶层";
+  $("gen-errors").textContent = ""; $("gen-status").textContent = "";
+  switchPanelView("generate");
+  renderMapCanvas();
+}
+
+function randRange([lo, hi]) { return +(lo + Math.random() * (hi - lo)).toFixed(2); }
+
+function genLocationName(kind, usedNames) {
+  const bank = GEN_NAME_BANK[kind];
+  for (let tries = 0; tries < 30; tries++) {
+    const p = bank.prefixes[Math.floor(Math.random() * bank.prefixes.length)];
+    const s = bank.suffixes[Math.floor(Math.random() * bank.suffixes.length)];
+    const name = p + s;
+    if (!usedNames.has(name)) { usedNames.add(name); return name; }
+  }
+  const fallback = kind + "_" + (usedNames.size + 1);
+  usedNames.add(fallback);
+  return fallback;
+}
+
+function genLocationId(usedIds) {
+  for (let tries = 0; tries < 50; tries++) {
+    const id = "auto_" + Math.random().toString(36).slice(2, 8);
+    if (!usedIds.has(id)) { usedIds.add(id); return id; }
+  }
+  const id = "auto_" + Date.now();
+  usedIds.add(id);
+  return id;
+}
+
+async function runGenerateLocations() {
+  const kinds = Array.from(document.querySelectorAll(".gen-kind:checked")).map(el => el.value);
+  const count = Math.max(1, Math.min(40, parseInt($("gen-count").value) || 0));
+  const connect = $("gen-connect").checked;
+  $("gen-errors").textContent = ""; $("gen-status").textContent = "";
+  if (!kinds.length) {
+    renderErrors($("gen-errors"), [{ field: "kind", message: "至少选一个地点类型" }]);
+    return;
+  }
+
+  $("gen-run-btn").disabled = true;
+  try {
+    const usedNames = new Set(locations.map(l => l.name));
+    const usedIds = new Set(locations.map(l => l.location_id));
+    const existingAtLevel = currentLevelLocations().map(l => l.location_id);
+
+    // 先问后端要不要得到 AI 生成的 {name, kind} 列表——真调没调得动模型（没配
+    // llm_config.json、网络/额度问题等）都由后端判断，前端只看 ok 字段决定要不要
+    // 用本地词库兜底，不重复猜测"为什么没调成"。
+    let llmItems = [];
+    let llmError = null;
+    const genResp = await api("POST", "/api/admin/generate_locations", { kinds, count });
+    if (genResp && genResp.ok && Array.isArray(genResp.items)) {
+      llmItems = genResp.items.filter(it => kinds.includes(it.kind) && it.name && !usedNames.has(it.name));
+    } else {
+      llmError = (genResp && genResp.error) || "调用失败";
+    }
+
+    const created = [];
+    for (let i = 0; i < count; i++) {
+      let kind, name;
+      if (i < llmItems.length) {
+        ({ kind, name } = llmItems[i]);
+        usedNames.add(name);
+      } else {
+        kind = kinds[Math.floor(Math.random() * kinds.length)];
+        name = genLocationName(kind, usedNames);
+      }
+      const dto = {
+        location_id: genLocationId(usedIds), name, kind, location_type: kind,
+        qi_density: randRange(GEN_QI_RANGE[kind]), danger_level: randRange(GEN_DANGER_RANGE[kind]),
+        condition: kind === "遗迹" ? "废墟" : (kind === "秘境" ? "秘境开启" : "完好"),
+        parent_location_id: mapParentId, x: 0, y: 0,
+        hidden: kind === "秘境", concealment: kind === "秘境" ? randRange([0.15, 0.4]) : 0,
+        discovered: kind !== "秘境",
+      };
+      const resp = await api("POST", "/api/admin/locations", dto);
+      if (resp.ok) created.push(dto.location_id);
+    }
+
+    let routeCount = 0;
+    if (connect && created.length > 0) {
+      const edgeKey = (a, b) => (a < b ? a + "|" + b : b + "|" + a);
+      const existingEdges = new Set(routes.map(r => edgeKey(r.from_id, r.to_id)));
+      const addEdge = async (a, b) => {
+        if (a === b) return;
+        const key = edgeKey(a, b);
+        if (existingEdges.has(key)) return;
+        existingEdges.add(key);
+        const resp = await api("POST", "/api/admin/routes", { from_id: a, to_id: b, move_cost_shichen: 1, bidirectional: true });
+        if (resp.ok) routeCount++;
+      };
+      // 生成树打底保证连通，再随机加一点额外边，形成网状而不是一条链。
+      for (let i = 1; i < created.length; i++) {
+        await addEdge(created[Math.floor(Math.random() * i)], created[i]);
+      }
+      const extra = Math.floor(created.length * 0.3);
+      for (let k = 0; k < extra; k++) {
+        await addEdge(created[Math.floor(Math.random() * created.length)], created[Math.floor(Math.random() * created.length)]);
+      }
+      // 跟当前层级已有的地点搭一条桥，避免新生成的一整片孤立在别处够不着。
+      if (existingAtLevel.length) {
+        await addEdge(existingAtLevel[Math.floor(Math.random() * existingAtLevel.length)], created[Math.floor(Math.random() * created.length)]);
+      }
+    }
+
+    let source;
+    if (llmItems.length >= count) source = "AI 生成";
+    else if (llmItems.length > 0) source = `AI 生成 ${llmItems.length} 个 + 本地随机补全 ${count - llmItems.length} 个`;
+    else source = `本地随机生成（AI 不可用：${llmError}）`;
+    $("gen-status").textContent = `${source}，共 ${created.length} 个地点${connect ? "、" + routeCount + " 条路线" : ""}。`;
+    await loadMap();
+  } finally {
+    $("gen-run-btn").disabled = false;
+  }
+}
+
+// ---------- 物品 ----------
+let items = [];
+
+async function loadItems() {
+  items = await api("GET", "/api/admin/items");
+  const body = document.querySelector("#item-table tbody");
+  body.innerHTML = "";
+  for (const it of items) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${it.item_id}</td><td>${it.name}</td><td>${it.kind}</td><td>${it.description}</td>` +
+      `<td><button class="btn secondary" onclick="event.stopPropagation(); deleteItem('${it.item_id}')">删除</button></td>`;
+    tr.addEventListener("click", () => fillItemForm(it));
+    body.appendChild(tr);
+  }
+}
+
+function fillItemForm(it) {
+  $("item-id").value = it.item_id; $("item-name").value = it.name;
+  $("item-kind").value = it.kind; $("item-desc").value = it.description;
+  $("item-stackable").checked = it.stackable; $("item-unique").checked = it.unique;
+}
+function clearItemForm() {
+  $("item-id").value = ""; $("item-name").value = ""; $("item-desc").value = "";
+  $("item-kind").value = "material"; $("item-stackable").checked = true; $("item-unique").checked = false;
+  $("item-errors").textContent = "";
+}
+
+async function saveItem() {
+  const dto = {
+    item_id: $("item-id").value.trim(), name: $("item-name").value.trim(),
+    kind: $("item-kind").value, description: $("item-desc").value,
+    stackable: $("item-stackable").checked, unique: $("item-unique").checked,
+  };
+  if (!dto.item_id) { renderErrors($("item-errors"), [{ field: "item_id", message: "必填" }]); return; }
+  const resp = await api("POST", "/api/admin/items", dto);
+  renderErrors($("item-errors"), resp.field_errors);
+  if (resp.ok) { await loadItems(); }
+}
+
+async function deleteItem(id) {
+  if (!confirm(`删除物品 ${id}？`)) return;
+  await api("DELETE", `/api/admin/items/${encodeURIComponent(id)}`);
+  await loadItems();
+}
+
+// ---------- 物品：AI 生成（同地图编辑器"AI 生成地点"的分工——AI 起名字/写描述，
+// 可堆叠/唯一这些机制字段按 kind 套固定规则，不让模型编。不做本地兜底：名字/
+// 描述这种"内容"就该是 AI 给的，AI 不可用就老实报错，不拿本地词库拼凑的假名字
+// 充数——跟事件生成器"AI 不可用就报错，不写敷衍文案"是同一个原则。）----------
+const ITEM_GEN_KINDS = ["food", "pill", "manual", "material", "gear"];
+const ITEM_GEN_KIND_LABELS = { food: "food 食物", pill: "pill 丹药", manual: "manual 秘籍", material: "material 材料", gear: "gear 装备" };
+const ITEM_GEN_DEFAULTS = {
+  food: { stackable: true, unique: false }, pill: { stackable: true, unique: false },
+  material: { stackable: true, unique: false }, manual: { stackable: false, unique: false },
+  gear: { stackable: false, unique: false },
+};
+
+function renderItemGenKindGrid() {
+  $("item-gen-kind-grid").innerHTML = ITEM_GEN_KINDS.map(k =>
+    `<label><input type="checkbox" class="item-gen-kind" value="${k}" checked />${ITEM_GEN_KIND_LABELS[k]}</label>`).join("");
+}
+
+function genItemId(usedIds) {
+  for (let tries = 0; tries < 50; tries++) {
+    const id = "auto_" + Math.random().toString(36).slice(2, 8);
+    if (!usedIds.has(id)) { usedIds.add(id); return id; }
+  }
+  const id = "auto_" + Date.now();
+  usedIds.add(id);
+  return id;
+}
+
+async function runGenerateItems() {
+  // 类型允许不选：不选就是不限定，交给 AI 在全部类型里自由发挥，跟事件生成器
+  // "情节描述留空"是同一个思路，不当成"漏选了"去拦。
+  const kinds = Array.from(document.querySelectorAll(".item-gen-kind:checked")).map(el => el.value);
+  const effectiveKinds = kinds.length ? kinds : ITEM_GEN_KINDS;
+  const novel = $("item-gen-novel").value.trim();
+  const count = Math.max(1, Math.min(30, parseInt($("item-gen-count").value) || 0));
+  $("item-gen-errors").textContent = ""; $("item-gen-status").textContent = "";
+
+  $("item-gen-run-btn").disabled = true;
+  try {
+    const usedNames = new Set(items.map(i => i.name));
+    const usedIds = new Set(items.map(i => i.item_id));
+
+    const genResp = await api("POST", "/api/admin/generate_items", { kinds, count, novel });
+    const llmItems = (genResp && genResp.ok && Array.isArray(genResp.items))
+      ? genResp.items.filter(it => effectiveKinds.includes(it.kind) && it.name && !usedNames.has(it.name))
+      : [];
+    if (!genResp || !genResp.ok) {
+      renderErrors($("item-gen-errors"), [{ field: "ai", message: (genResp && genResp.error) || "生成失败" }]);
+      return;
+    }
+    if (!llmItems.length) {
+      renderErrors($("item-gen-errors"), [{ field: "ai", message: "AI 没能给出可用的物品（也可能是接口返回格式不对），再试一次或换个类型看看" }]);
+      return;
+    }
+
+    let created = 0;
+    for (const it of llmItems) {
+      usedNames.add(it.name);
+      const defaults = ITEM_GEN_DEFAULTS[it.kind] || { stackable: true, unique: false };
+      const resp = await api("POST", "/api/admin/items", {
+        item_id: genItemId(usedIds), name: it.name, kind: it.kind, description: it.description || "",
+        stackable: defaults.stackable, unique: defaults.unique,
+      });
+      if (resp.ok) created++;
+    }
+
+    $("item-gen-status").textContent = `AI 生成，共 ${created} 个物品`
+      + (llmItems.length < count ? `（请求 ${count} 个，AI 只给了 ${llmItems.length} 个）` : "") + "。";
+    await loadItems();
+  } finally {
+    $("item-gen-run-btn").disabled = false;
+  }
+}
+
+// ---------- 事件 ----------
+// events 数组在地图模块顶部已声明（地点详情面板的"关联事件"要引用它）。
+async function loadEvents() {
+  events = await api("GET", "/api/admin/events");
+  renderEventList();
+  // 地图那边可能已经打开了某个地点的详情面板——事件列表加载完之前它只能显示"暂无
+  // 匹配"，这里补一次刷新，不然要等用户重新点一次地点才会看到关联事件。
+  if (mapPanelState === "loc" && mapSelectedId) {
+    const loc = locations.find(l => l.location_id === mapSelectedId);
+    if (loc) renderRelatedEvents(loc);
+  }
+}
+
+function renderEventList() {
+  const q = ($("event-search").value || "").toLowerCase();
+  const body = $("event-list");
+  body.innerHTML = "";
+  for (const e of events) {
+    const hay = (e.event_id + " " + e.tags.join(" ")).toLowerCase();
+    if (q && !hay.includes(q)) continue;
+    const tr = document.createElement("tr");
+    const badge = e.is_draft ? '<span class="badge draft">草稿</span>' : '<span class="badge published">已发布</span>';
+    tr.innerHTML = `<td>${e.event_id}<br/>${badge} ${e.tags.join(",")}</td>`;
+    tr.addEventListener("click", () => loadEventDetail(e.event_id));
+    body.appendChild(tr);
+  }
+}
+
+// 旧版结构化 predicate/result_pool/variants/reply_options 不再在表单里暴露编辑，
+// 但也不能默默丢掉已有数据——加载时记下来，保存时原样带回去（result_pool 例外：
+// ev-result-text 有内容时后端会用解析结果整体替换，见 buildEventDto() 的注释）。
+// variants 留空是特意的：触发时为空会由 LlmEventWriter 现场补一句叙事并存回
+// （model/services/live_narrative_writer.py），不是"表单没做完"。
+let loadedEventPredicate = null;
+let loadedEventResultPool = [];
+let loadedEventVariants = [];
+let loadedEventReplyOptions = [];
+
+async function loadEventDetail(id) {
+  const d = await api("GET", `/api/admin/events/${encodeURIComponent(id)}`);
+  $("ev-id").value = d.event_id; $("ev-priority").value = d.priority;
+  $("ev-locations").value = arrToCsv(d.applicable_locations);
+  $("ev-time").value = arrToCsv(d.applicable_time);
+  $("ev-weight").value = d.weight; $("ev-duration").value = d.duration_shichen;
+  $("ev-cooldown").value = d.cooldown_shichen; $("ev-max-trigger").value = d.max_trigger_per_agent ?? "";
+  $("ev-tags").value = arrToCsv(d.tags); $("ev-exclusive").value = arrToCsv(d.exclusive_tags);
+  $("ev-aliases").value = arrToCsv(d.aliases); $("ev-scenario-ref").value = d.scenario_ref || "";
+  $("ev-is-command").checked = d.is_command; $("ev-is-draft").checked = d.is_draft;
+  $("ev-predicate-text").value = d.predicate_text || "";
+  $("ev-result-text").value = d.result_text || "";
+  loadedEventPredicate = d.predicate || null;
+  loadedEventResultPool = d.result_pool || [];
+  loadedEventVariants = d.variants || [];
+  loadedEventReplyOptions = d.reply_options || [];
+  $("ev-predicate-old-hint").style.display = loadedEventPredicate ? "" : "none";
+  $("ev-result-old-hint").style.display = loadedEventResultPool.length ? "" : "none";
+  $("ev-variants-hint").style.display = loadedEventVariants.length ? "" : "none";
+  $("ev-reply-hint").style.display = loadedEventReplyOptions.length ? "" : "none";
+  $("ev-errors").textContent = ""; $("ev-ok").textContent = "";
+  $("sim-event-id").value = d.event_id;
+}
+
+function clearEventForm() {
+  for (const id of ["ev-id","ev-time","ev-max-trigger","ev-tags","ev-exclusive","ev-aliases","ev-scenario-ref",
+                     "ev-predicate-text","ev-result-text"]) $(id).value = "";
+  $("ev-locations").value = "*"; $("ev-priority").value = "5"; $("ev-weight").value = "1.0";
+  $("ev-duration").value = "1"; $("ev-cooldown").value = "0";
+  $("ev-is-command").checked = false; $("ev-is-draft").checked = true;
+  loadedEventPredicate = null; loadedEventResultPool = []; loadedEventVariants = []; loadedEventReplyOptions = [];
+  $("ev-predicate-old-hint").style.display = "none"; $("ev-result-old-hint").style.display = "none";
+  $("ev-variants-hint").style.display = "none"; $("ev-reply-hint").style.display = "none";
+  $("ev-errors").textContent = ""; $("ev-ok").textContent = "";
+}
+
+function buildEventDto() {
+  const resultText = $("ev-result-text").value.trim();
+  return {
+    event_id: $("ev-id").value.trim(),
+    applicable_locations: csvToArr($("ev-locations").value) || ["*"],
+    applicable_time: $("ev-time").value.trim() ? csvToArr($("ev-time").value).map(Number) : null,
+    predicate: loadedEventPredicate,  // 旧版结构化谓词原样带回去，这套表单不改它
+    predicate_text: $("ev-predicate-text").value.trim(),
+    weight: parseFloat($("ev-weight").value) || 0,
+    duration_shichen: parseInt($("ev-duration").value) || 0,
+    cooldown_shichen: parseInt($("ev-cooldown").value) || 0,
+    max_trigger_per_agent: $("ev-max-trigger").value.trim() ? parseInt($("ev-max-trigger").value) : null,
+    exclusive_tags: csvToArr($("ev-exclusive").value),
+    priority: parseInt($("ev-priority").value) || 5,
+    tags: csvToArr($("ev-tags").value),
+    aliases: csvToArr($("ev-aliases").value),
+    // result_text 有内容时后端会解析并整体替换 result_pool；没内容时这里传回
+    // loadedEventResultPool，保留原样不动。
+    result_pool: resultText ? [] : loadedEventResultPool,
+    result_text: resultText,
+    variants: loadedEventVariants,  // 表单不编辑，原样带回去（新建事件默认 []）
+    reply_options: loadedEventReplyOptions,
+    scenario_ref: $("ev-scenario-ref").value.trim() || null,
+    is_command: $("ev-is-command").checked,
+    is_draft: $("ev-is-draft").checked,
+  };
+}
+
+// ---------- 事件：AI 生成（参考情节描述，出草稿；不像地点/物品生成器那样有本地
+// 兜底——叙事文案离不开真的语言模型，本地词库拼不出"像小说片段"的东西，AI 不可用
+// 就老实报错，不拿一句敷衍文案糊弄过去）----------
+async function runGenerateEvents() {
+  // 情节描述允许留空——留空就是明确要 AI 自己构思场景，不当成"忘了填"去拦。
+  const description = $("evgen-description").value.trim();
+  const locations = csvToArr($("evgen-locations").value);
+  const count = Math.max(1, Math.min(10, parseInt($("evgen-count").value) || 0));
+  $("evgen-errors").textContent = ""; $("evgen-status").textContent = "";
+
+  $("evgen-run-btn").disabled = true;
+  try {
+    const resp = await api("POST", "/api/admin/generate_events", {
+      description, applicable_locations: locations.length ? locations : ["*"], count,
+    });
+    const createdCount = (resp.event_ids || []).length;
+    if (!resp.ok && createdCount === 0) {
+      const errs = (resp.field_errors && resp.field_errors.length) ? resp.field_errors : [{ field: "ai", message: resp.error || "生成失败" }];
+      renderErrors($("evgen-errors"), errs);
+      return;
+    }
+    const rejected = resp.field_errors ? resp.field_errors.length : 0;
+    $("evgen-status").textContent = `已生成 ${createdCount} 条草稿事件，可在左侧列表里打开查看/编辑/发布。`
+      + (rejected ? `（另有 ${rejected} 条没通过校验，已跳过）` : "");
+    await loadEvents();
+  } finally {
+    $("evgen-run-btn").disabled = false;
+  }
+}
+
+async function saveEvent() {
+  $("ev-ok").textContent = "";
+  let dto;
+  try { dto = buildEventDto(); }
+  catch (e) { renderErrors($("ev-errors"), [{ field: "json", message: "JSON 格式错误：" + e.message }]); return; }
+  const resp = await api("POST", "/api/admin/events", dto);
+  renderErrors($("ev-errors"), resp.field_errors);
+  if (resp.ok) {
+    $("ev-ok").textContent = "已保存：" + resp.event_id;
+    $("sim-event-id").value = resp.event_id;
+    await loadEvents();
+  }
+}
+
+async function publishEvent() {
+  const id = $("ev-id").value.trim();
+  if (!id) return;
+  await saveEvent();
+  const resp = await api("POST", `/api/admin/events/${encodeURIComponent(id)}/publish`, {});
+  if (resp.ok) { $("ev-ok").textContent = "已发布：" + id; $("ev-is-draft").checked = false; await loadEvents(); }
+}
+
+async function unpublishEvent() {
+  const id = $("ev-id").value.trim();
+  if (!id) return;
+  const resp = await api("POST", `/api/admin/events/${encodeURIComponent(id)}/unpublish`, {});
+  if (resp.ok) { $("ev-ok").textContent = "已撤回为草稿：" + id; $("ev-is-draft").checked = true; await loadEvents(); }
+}
+
+async function deleteEvent() {
+  const id = $("ev-id").value.trim();
+  if (!id || !confirm(`删除事件 ${id}？`)) return;
+  await api("DELETE", `/api/admin/events/${encodeURIComponent(id)}`);
+  clearEventForm();
+  await loadEvents();
+}
+
+// ---------- 模拟触发 ----------
+async function runSimulate() {
+  const id = $("sim-event-id").value.trim();
+  if (!id) { $("sim-result").textContent = "先填 event_id。"; return; }
+  let snapshot;
+  try { snapshot = jsonOrNull($("sim-snapshot").value) || {}; }
+  catch (e) { $("sim-result").textContent = "快照 JSON 格式错误：" + e.message; return; }
+  const resp = await api("POST", "/api/admin/simulate", {
+    event_id: id, context_snapshot: snapshot, sample_n: parseInt($("sim-n").value) || 100,
+  });
+  $("sim-result").textContent = JSON.stringify(resp, null, 2);
+}
+
+// Esc 退回选择模式 + 浏览态；选中节点后按 Delete/Backspace 直接删——前提是焦点不在
+// 输入框里（否则没法正常删字）。
+document.addEventListener("keydown", (evt) => {
+  if (!$("pane-mapeditor").classList.contains("active")) return;
+  if (evt.key === "Escape") {
+    setMapMode("select");
+    showListView();
+    return;
+  }
+  if (evt.key !== "Delete" && evt.key !== "Backspace") return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(tag)) return;
+  if (!mapSelectedId) return;
+  evt.preventDefault();
+  deleteLocation(mapSelectedId);
+});
+
+// 窗口大小变化时画布跟着重新撑满——防抖，不然拖窗口边框时每个像素都触发一次布局。
+let resizeDebounce = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeDebounce);
+  resizeDebounce = setTimeout(() => {
+    if ($("pane-mapeditor").classList.contains("active")) renderMapCanvas();
+  }, 120);
+});
+
+renderMapLegend();
+renderGenKindGrid();
+renderItemGenKindGrid();
+loadMap();
+loadItems();
+loadEvents();
+</script>
+</body>
+</html>

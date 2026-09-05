@@ -15,12 +15,20 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from model.domain.diff import AppliedDiff, apply_agent_diff
-from model.domain.events import GameEventOccurrence, TriggerSource
+from model.domain.events import EventVariant, GameEventOccurrence, TriggerSource
 from model.domain.results import StateChange
 from model.domain.system_events import AgentStateChanged
 from model.services.arbiter import ArbitrationDecision, EventArbiter
 from model.services.chat_parser import MOVE_EVENT_ID, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
-from model.services.matching import MatchContext, coarse_filter, pick_variant, reweight_and_pick, tidal_beast_weight_multiplier
+from model.services.live_narrative_writer import generate_live_variant_text
+from model.services.matching import (
+    MatchContext,
+    build_context_embedding,
+    coarse_filter,
+    pick_variant,
+    reweight_and_pick,
+    tidal_beast_weight_multiplier,
+)
 from model.services.pipeline import Pipeline, PipelineContext
 from model.services.retreat_intent_parser import parse_retreat_duration, stop_when_realm_reached
 from model.services.turn_result import TurnResult
@@ -33,7 +41,8 @@ if TYPE_CHECKING:
     from model.services.chat_parser import ChatParser
     from model.services.clock_service import GameClock, RetreatService
     from model.services.event_bus import EventBus
-    from model.services.ports import EventLogStore, EventRepository, ScenarioRepository
+    from model.services.live_narrative_writer import LlmClient
+    from model.services.ports import EmbeddingPort, EventLogStore, EventRepository, ScenarioRepository
 
 _RETREAT_PROMPT_TEXT = '要闭关多久？（可以说"十年""到金丹为止"或"随便"）'
 _RETREAT_UNPARSEABLE_TEXT = '没听懂要闭关多久，你可以说"十年""到金丹为止"或"随便"。'
@@ -53,6 +62,8 @@ class PlayTurnService:
         clock: "GameClock",
         retreat: "RetreatService | None" = None,
         balance: "BalanceTable | None" = None,
+        embedding: "EmbeddingPort | None" = None,
+        narrative_writer: "LlmClient | None" = None,
     ) -> None:
         self.bus = bus
         self.arbiter = arbiter
@@ -65,13 +76,35 @@ class PlayTurnService:
         self.clock = clock
         self.retreat = retreat
         self.balance = balance
+        self.embedding = embedding
+        self.narrative_writer = narrative_writer
+        # embedding/narrative_writer 都是可选的（未配置就是 None）：embedding 只用于
+        # predicate_text 的向量相似度判定；narrative_writer 是 LlmEventWriter（README
+        # 对局第二段表格），事件命中但 variants 为空时现场补一句文案，见
+        # _ensure_variants()。README 5.3 对局隔离针对的是"录入侧大模型草稿生成"那个
+        # 端口，不是这两个——V2 向量匹配/LlmEventWriter 本来就该在对局路径里用。
         self.bus.subscribe(GameEventOccurrence, self._on_occurrence_published)
+
+    def _ensure_variants(self, defn: "GameEventDef") -> "GameEventDef":
+        """variants 留空 = 用户在编辑器里没填（或压根没在表单里露出这个字段），
+        交给 LlmEventWriter 现场补一句，并存回仓库——下次同一事件命中就不用再现场
+        生成（README："临时补一条，建议事后再走…落库"）。只在这里对"确实从仓库
+        按 id 取到的原始定义"调用；调用方必须保证传进来的不是 replace() 造出来的
+        局部 synthetic（那种一 save 会把 result_pool/predicate 这些被临时改写的
+        字段也存回去，冲掉原定义）。"""
+        if defn.variants:
+            return defn
+        text = generate_live_variant_text(self.narrative_writer, defn.event_id, defn.tags)
+        patched = replace(defn, variants=(EventVariant(text=text),))
+        self.events.save_event_def(patched)
+        return patched
 
     # ---------- 总线订阅：日程/连锁等通过 publish 投递的 Occurrence 走这里 ----------
     def _on_occurrence_published(self, occ: GameEventOccurrence) -> None:
         defn = self.events.get_by_id(occ.event_id)
         if defn is None or defn.is_draft:
             return
+        defn = self._ensure_variants(defn)
         # 世界引用由调用方在 publish 前已经通过闭包/上下文绑定；总线路径下 world 由
         # 订阅时注入的 world_provider 提供，MVP 单主角场景通常已知晓当前 WorldView。
         world = self._world_provider() if self._world_provider else None
@@ -123,6 +156,7 @@ class PlayTurnService:
         defn = self.events.get_by_id(cmd.event_id)
         if defn is None or defn.is_draft or not defn.is_command:
             return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+        defn = self._ensure_variants(defn)
         occ = self._new_occurrence(agent, defn, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, defn) or TurnResult.rejected("现在做不了这个。")
 
@@ -146,7 +180,7 @@ class PlayTurnService:
         if destination is None:
             hint = cmd.location_hint or "那里"
             return TurnResult.rejected(f"找不到「{hint}」这个地方。")
-        base = self.events.get_by_id(MOVE_EVENT_ID) or _default_move_def()
+        base = self._ensure_variants(self.events.get_by_id(MOVE_EVENT_ID) or _default_move_def())
         synthetic = replace(
             base, result_pool=(StateChange(field="location", set_to=destination.location_id),), predicate=None, is_command=True
         )
@@ -236,6 +270,9 @@ class PlayTurnService:
             realm=agent.realm,
             money=agent.money,
             causes=agent.causes,
+            context_embedding=build_context_embedding(
+                self.embedding, location_type=agent.location_type, realm=agent.realm, money=agent.money, age=agent.age
+            ),
         )
         candidates = coarse_filter(pool, mctx, agent.as_eval_context(world), agent.event_history)
         now = self.clock.now()
@@ -245,6 +282,7 @@ class PlayTurnService:
         )
         if picked is None:
             return first  # 抽空：酒楼无事，状态已由上一步 settle
+        picked = self._ensure_variants(picked)
 
         if picked.needs_reply:
             self._park_encounter(agent, picked)  # 只叙述、不结算，等下一句
@@ -296,6 +334,7 @@ class PlayTurnService:
         把它的叙述接在后面，而不是丢给总线让 _on_occurrence_published 静默处理掉
         （那样结果没人接，玩家会看不到链式事件到底发生了什么）。
         """
+        pending_def = self._ensure_variants(pending_def)
         option = pending_def.reply_options[option_index]
         synthetic = replace(pending_def, result_pool=option.results, predicate=None, reply_options=())
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
@@ -308,6 +347,7 @@ class PlayTurnService:
         if option.chain_event_id:
             chain_def = self.events.get_by_id(option.chain_event_id)
             if chain_def is not None and not chain_def.is_draft:
+                chain_def = self._ensure_variants(chain_def)
                 spawned_queue.append(self._new_occurrence(agent, chain_def, TriggerSource.CHAIN))
 
         chain_result: TurnResult | None = None
@@ -315,6 +355,7 @@ class PlayTurnService:
             first_spawned = spawned_queue.pop(0)
             chain_defn = self.events.get_by_id(first_spawned.event_id)
             if chain_defn is not None and not chain_defn.is_draft:
+                chain_defn = self._ensure_variants(chain_defn)
                 chain_result = self.execute_occurrence(agent, world, first_spawned, chain_defn)
         for spawned in spawned_queue:  # 极少见的多重连锁：其余的仍走总线，只是叙述不合并
             self.bus.publish(spawned)
@@ -341,12 +382,10 @@ class PlayTurnService:
             agent.state = agent.state.settle(agent)
             return TurnResult.dismissed()
 
-        synthetic = replace(
-            self.events.get_by_id(agent.pending_scenario.host_event_id) or _blank_event_def(next_node.node_id),
-            result_pool=next_node.results,
-            predicate=None,
-            reply_options=(),
+        host_def = self._ensure_variants(
+            self.events.get_by_id(agent.pending_scenario.host_event_id) or _blank_event_def(next_node.node_id)
         )
+        synthetic = replace(host_def, result_pool=next_node.results, predicate=None, reply_options=())
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
         ctx = self.pipeline.run(PipelineContext(occ, synthetic, agent, world, chosen_variant=occ.chosen_variant_index))
 

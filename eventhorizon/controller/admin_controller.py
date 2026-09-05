@@ -9,11 +9,13 @@ model/services/event_validation.py 的同一份函数（跟 editor_controller.py
 """
 from __future__ import annotations
 
+import logging
 import random
+import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from model.domain.agent import AgentEventHistory
@@ -21,12 +23,21 @@ from model.domain.events import GameEventDef
 from model.domain.items import ItemDef, ItemKind
 from model.domain.map import Location, LocationCondition, LocationKind, Route
 from model.services.event_validation import ValidationCatalog, validate_event_def
+from model.services.local_embedding import embed_with_fallback
 from model.services.simulation_service import simulate_trigger
 from view.schemas.admin_schemas import (
     EventDetailDTO,
     EventSummaryDTO,
     FieldErrorDTO,
+    GenerateEventsRequest,
+    GenerateEventsResponse,
+    GenerateItemsRequest,
+    GenerateItemsResponse,
+    GenerateLocationsRequest,
+    GenerateLocationsResponse,
     ItemDTO,
+    LlmItemItemDTO,
+    LlmLocationItemDTO,
     LocationDTO,
     RouteDTO,
     SaveEventResponse,
@@ -34,16 +45,31 @@ from view.schemas.admin_schemas import (
     SimulateRequest,
     SimulateResponse,
 )
-from view.web.admin_page import render_admin_page
+from view.templating import templates
 
 if TYPE_CHECKING:
     from bootstrap import AppContext
+    from model.repositories.llm.llm_event_flavor_author import LlmEventFlavorAuthor
+    from model.repositories.llm.llm_item_author import LlmItemAuthor
+    from model.repositories.llm.llm_location_author import LlmLocationAuthor
+    from model.repositories.llm.llm_result_text_parser import LlmResultTextParser
+    from model.services.ports import EmbeddingPort
+
+_logger = logging.getLogger("eventhorizon.admin_controller")
 
 
-def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
+def register_admin_routes(
+    fastapi_app: FastAPI,
+    app_ctx: "AppContext",
+    llm_location_author: "LlmLocationAuthor | None" = None,
+    llm_item_author: "LlmItemAuthor | None" = None,
+    llm_event_flavor_author: "LlmEventFlavorAuthor | None" = None,
+    embedding: "EmbeddingPort | None" = None,
+    llm_result_text_parser: "LlmResultTextParser | None" = None,
+) -> None:
     @fastapi_app.get("/admin", response_class=HTMLResponse)
-    def admin_index() -> str:
-        return render_admin_page()
+    def admin_index(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("admin.html", {"request": request})
 
     # ---------- 地图 / 城市 ----------
 
@@ -125,6 +151,19 @@ def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
         app_ctx.world_repo.save(app_ctx.clock.now())
         return SaveLocationResponse(ok=True)
 
+    # ---------- 地图：AI 生成（可选，需要 llm_config.json 配好才真正调模型）----------
+
+    @fastapi_app.post("/api/admin/generate_locations", response_model=GenerateLocationsResponse)
+    def generate_locations(req: GenerateLocationsRequest) -> GenerateLocationsResponse:
+        if llm_location_author is None:
+            return GenerateLocationsResponse(ok=False, error="LLM 未配置（检查 eventhorizon/llm_config.json）")
+        try:
+            items = llm_location_author.generate_locations(req.kinds, req.count)
+        except Exception as exc:  # 网络/超时/接口格式问题不该让整个请求 500——前端按 ok=False 回退到本地生成
+            _logger.warning("LLM 生成地点失败：%s", exc)
+            return GenerateLocationsResponse(ok=False, error=str(exc))
+        return GenerateLocationsResponse(ok=True, items=[LlmLocationItemDTO(**it) for it in items])
+
     # ---------- 物品 ----------
 
     @fastapi_app.get("/api/admin/items", response_model=list[ItemDTO])
@@ -137,10 +176,17 @@ def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
             kind = ItemKind(dto.kind)
         except ValueError as exc:
             return SaveLocationResponse(ok=False, field_errors=[FieldErrorDTO(field="kind", message=str(exc))])
+        # 保存时预计算 name+description 的向量并缓存（README 1.4.1 的"录入时预计算"
+        # 原则）——事件"结果"提到"获得某样东西"时，就是拿这份向量去做相似度匹配
+        # （model/services/item_embedding_match.py），不在每次触发时现场编码全库。
+        # LLM 向量化失败（没配置/网络/账户余额等）时退到本地向量化，不是直接放弃——
+        # 物品名字/描述是名词短语，本地的字符词袋对这种比较还算有区分度（不像
+        # predicate_text 那种数值条件判断，本地词袋在那边只会帮倒忙）。
+        item_embedding = embed_with_fallback(embedding, f"{dto.name} {dto.description}".strip())
         app_ctx.items.save_item_def(
             ItemDef(
                 item_id=dto.item_id, kind=kind, stackable=dto.stackable, unique=dto.unique,
-                name=dto.name, description=dto.description,
+                name=dto.name, description=dto.description, embedding=item_embedding,
             )
         )
         return SaveLocationResponse(ok=True)
@@ -150,6 +196,17 @@ def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
         if not app_ctx.items.delete_item_def(item_id):
             raise HTTPException(404, "物品不存在")
         return SaveLocationResponse(ok=True)
+
+    @fastapi_app.post("/api/admin/generate_items", response_model=GenerateItemsResponse)
+    def generate_items(req: GenerateItemsRequest) -> GenerateItemsResponse:
+        if llm_item_author is None:
+            return GenerateItemsResponse(ok=False, error="LLM 未配置（检查 eventhorizon/llm_config.json）")
+        try:
+            items = llm_item_author.generate_items(req.kinds, req.count, req.novel)
+        except Exception as exc:  # 网络/超时/接口格式问题不该让整个请求 500——前端按 ok=False 报错，不拿本地内容凑数
+            _logger.warning("LLM 生成物品失败：%s", exc)
+            return GenerateItemsResponse(ok=False, error=str(exc))
+        return GenerateItemsResponse(ok=True, items=[LlmItemItemDTO(**it) for it in items])
 
     # ---------- 事件 ----------
 
@@ -173,6 +230,32 @@ def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
     @fastapi_app.post("/api/admin/events", response_model=SaveEventResponse)
     def save_event(dto: EventDetailDTO) -> SaveEventResponse:
         raw = dto.model_dump()
+        # predicate_text -> predicate_embedding：编辑器不再让人手填这个向量，保存时
+        # 用 EmbeddingPort 现算一次并缓存（README 1.4.1："录入时预计算"，不在每次
+        # 触发时现场编码）。没配置 embedding 或调用失败都不能让保存这个动作本身
+        # 失败——退化成空向量，运行时 fail-open 当无条件处理（matching.py）。
+        predicate_text = str(raw.get("predicate_text") or "").strip()
+        if predicate_text and embedding is not None:
+            try:
+                raw["predicate_embedding"] = embedding.embed(predicate_text)
+            except Exception as exc:
+                _logger.warning("predicate_text 向量化失败：%s", exc)
+                raw["predicate_embedding"] = []
+        else:
+            raw["predicate_embedding"] = []
+        # result_text -> result_pool：只有真的填了文字描述才尝试解析、并整体替换
+        # result_pool；留空就是前端传回来的原样（旧数据或空列表），不去动它。
+        result_text = str(raw.get("result_text") or "").strip()
+        if result_text and llm_result_text_parser is not None:
+            try:
+                outcome = llm_result_text_parser.parse(result_text)
+                result_pool = list(outcome.state_changes)
+                item_result = _resolve_item_query(outcome.item_query, app_ctx, embedding)
+                if item_result is not None:
+                    result_pool.append(item_result)
+                raw["result_pool"] = result_pool
+            except Exception as exc:
+                _logger.warning("result_text 解析失败：%s", exc)
         catalog = _build_catalog(app_ctx)
         defn, errors = validate_event_def(raw, catalog)
         if defn is None:
@@ -180,6 +263,59 @@ def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
         app_ctx.events.save_event_def(defn)
         _refresh_parser_if_needed(app_ctx)
         return SaveEventResponse(ok=True, event_id=defn.event_id)
+
+    @fastapi_app.post("/api/admin/generate_events", response_model=GenerateEventsResponse)
+    def generate_events(req: GenerateEventsRequest) -> GenerateEventsResponse:
+        """AI 生成事件：模型出 tags/aliases/variants/weight/duration_shichen/
+        cooldown_shichen/priority/result_pool（可参考小说式情节描述），数据完整度
+        跟手工录入的事件一致；predicate 仍然固定 None（谓词是递归判别联合类型，
+        模型编不出合法组合，宁可不生成也不生成错的），result_pool 已在
+        LlmEventFlavorAuthor 里过滤成只剩安全的 state_change 条目。整条仍然过
+        validate_event_def()——跟手工在编辑器里存草稿走的是同一条校验路径，不会
+        因为是 AI 生成就绕开。校验没过的条目单独计入 field_errors，不影响其它
+        条目正常入库。"""
+        if llm_event_flavor_author is None:
+            return GenerateEventsResponse(ok=False, error="LLM 未配置（检查 eventhorizon/llm_config.json）")
+        try:
+            flavors = llm_event_flavor_author.generate_event_flavors(req.description, req.count)
+        except Exception as exc:
+            _logger.warning("LLM 生成事件失败：%s", exc)
+            return GenerateEventsResponse(ok=False, error=str(exc))
+
+        catalog = _build_catalog(app_ctx)
+        created_ids: list[str] = []
+        field_errors: list[FieldErrorDTO] = []
+        for flavor in flavors:
+            result_pool = list(flavor.get("result_pool", []))
+            item_result = _resolve_item_query(flavor.get("item_query", ""), app_ctx, embedding)
+            if item_result is not None:
+                result_pool.append(item_result)
+            raw = {
+                "event_id": "ai_" + uuid.uuid4().hex[:10],
+                "applicable_locations": req.applicable_locations or ["*"],
+                "predicate": None,
+                "weight": flavor.get("weight", 1.0),
+                "duration_shichen": flavor.get("duration_shichen", 1),
+                "cooldown_shichen": flavor.get("cooldown_shichen", 0),
+                "priority": flavor.get("priority", 5),
+                "tags": flavor.get("tags", []),
+                "aliases": flavor.get("aliases", []),
+                "result_pool": result_pool,
+                "variants": [{"text": text, "weight": 1.0} for text in flavor.get("variants", [])],
+                "is_draft": True,
+                "is_command": bool(flavor.get("aliases")),
+            }
+            defn, errors = validate_event_def(raw, catalog)
+            if defn is not None:
+                app_ctx.events.save_event_def(defn)
+                created_ids.append(defn.event_id)
+            else:
+                field_errors.extend(FieldErrorDTO(field=f"{raw['event_id']}.{e.field}", message=e.message) for e in errors)
+        if created_ids:
+            _refresh_parser_if_needed(app_ctx)
+        if not flavors:
+            return GenerateEventsResponse(ok=False, error="AI 没能给出可用的文案（也可能是接口返回格式不对），换一段描述再试试")
+        return GenerateEventsResponse(ok=bool(created_ids), event_ids=created_ids, field_errors=field_errors)
 
     @fastapi_app.post("/api/admin/events/{event_id}/publish", response_model=SaveEventResponse)
     def publish_event(event_id: str) -> SaveEventResponse:
@@ -213,7 +349,7 @@ def register_admin_routes(fastapi_app: FastAPI, app_ctx: "AppContext") -> None:
     def simulate(request: SimulateRequest) -> SimulateResponse:
         outcome = simulate_trigger(
             app_ctx.events, request.event_id, request.context_snapshot,
-            AgentEventHistory(), request.sample_n, random.Random(),
+            AgentEventHistory(), request.sample_n, random.Random(), embedding,
         )
         return SimulateResponse(
             passed_coarse_filter=outcome.passed_coarse_filter,
@@ -234,6 +370,25 @@ def _build_catalog(app_ctx: "AppContext") -> ValidationCatalog:
         known_event_ids={e.event_id for e in app_ctx.events.list_all()},
         known_scenario_ids=set(app_ctx.scenarios.graphs.keys()),
     )
+
+
+def _resolve_item_query(item_query: str, app_ctx: "AppContext", embedding: "EmbeddingPort | None") -> dict | None:
+    """"结果"文字描述里提到的物品（一句自然语言，比如"一把锋利的长剑"）解析成
+    真实存在的 item_drop——用向量相似度在物品库里找语义最接近的一个（见
+    model/services/item_embedding_match.py），找不到就是 None（宁可没有物品效果，
+    也不把一个不相关的东西塞进背包）。LLM 向量化失败/未配置时退到本地词袋向量
+    （embed_with_fallback），不像 predicate_text 那样直接放弃——物品名字/描述是
+    名词短语，本地词袋对这种比较还有区分度。"""
+    item_query = item_query.strip()
+    if not item_query:
+        return None
+    from model.services.item_embedding_match import find_best_matching_item
+
+    query_embedding = embed_with_fallback(embedding, item_query)
+    matched = find_best_matching_item(app_ctx.items.list_all(), query_embedding)
+    if matched is None:
+        return None
+    return {"kind": "item_drop", "item_id": matched.item_id, "n": 1}
 
 
 def _location_to_dto(loc: Location) -> LocationDTO:
@@ -283,4 +438,7 @@ def _event_to_dto(defn: GameEventDef) -> EventDetailDTO:
         scenario_ref=defn.scenario_ref,
         is_draft=defn.is_draft,
         is_command=defn.is_command,
+        predicate_text=defn.predicate_text,
+        predicate_embedding=list(defn.predicate_embedding),
+        result_text=defn.result_text,
     )

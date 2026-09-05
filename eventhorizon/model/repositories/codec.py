@@ -149,6 +149,9 @@ def event_def_to_dict(e: GameEventDef) -> dict:
         "schema_version": e.schema_version,
         "is_draft": e.is_draft,
         "is_command": e.is_command,
+        "predicate_text": e.predicate_text,
+        "predicate_embedding": list(e.predicate_embedding),
+        "result_text": e.result_text,
     }
 
 
@@ -182,6 +185,9 @@ def event_def_from_dict(d: dict) -> GameEventDef:
         schema_version=d.get("schema_version", 1),
         is_draft=d.get("is_draft", False),
         is_command=d.get("is_command", False),
+        predicate_text=d.get("predicate_text", ""),
+        predicate_embedding=tuple(d.get("predicate_embedding") or ()),
+        result_text=d.get("result_text", ""),
     )
 
 

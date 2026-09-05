@@ -1,0 +1,7 @@
+# EventHorizon 项目依赖——跟 pyproject.toml 的 [project].dependencies 保持一致，
+# 这份是给 `pip install -r requirements.txt` 用的（本项目暂时没有可安装的包
+# 元数据，见 pyproject.toml 里 dependencies 上面那条注释）。
+fastapi>=0.100
+uvicorn>=0.22
+httpx>=0.24
+jinja2>=3.1

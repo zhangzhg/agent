@@ -9,3 +9,7 @@ __pycache__/
 venv/
 *.db
 *.sqlite3
+
+# LLM 连接配置的本地覆盖——装真实 api_key 用，不能提交到 git（见
+# eventhorizon/model/repositories/llm/llm_config.py）。
+eventhorizon/llm_config.local.json

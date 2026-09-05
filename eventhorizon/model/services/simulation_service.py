@@ -18,11 +18,11 @@ from typing import TYPE_CHECKING
 
 from model.domain.predicates import EvalContext
 from model.domain.time import Epoch, GameTime
-from model.services.matching import MatchContext, coarse_filter, reweight_and_pick
+from model.services.matching import MatchContext, build_context_embedding, coarse_filter, reweight_and_pick
 
 if TYPE_CHECKING:
     from model.domain.agent import AgentEventHistory
-    from model.services.ports import EventRepository
+    from model.services.ports import EmbeddingPort, EventRepository
 
 
 @dataclass
@@ -74,6 +74,7 @@ def simulate_trigger(
     history: "AgentEventHistory",
     sample_n: int,
     rng: random.Random,
+    embedding: "EmbeddingPort | None" = None,
 ) -> SimulationOutcome:
     snap = context_snapshot
     pool = events.load_event_defs(snap.get("地点类型"))
@@ -87,6 +88,10 @@ def simulate_trigger(
         realm=snap.get("境界", ""),
         money=snap.get("金钱", 0),
         causes=[],
+        context_embedding=build_context_embedding(
+            embedding, location_type=snap.get("地点类型", ""), realm=snap.get("境界", ""),
+            money=snap.get("金钱", 0), age=snap.get("年龄", 0),
+        ),
     )
     eval_ctx = SnapshotEvalContext(snap)
     candidates = coarse_filter(pool, mctx, eval_ctx, history)

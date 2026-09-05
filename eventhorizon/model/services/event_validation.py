@@ -93,9 +93,10 @@ def validate_event_def(raw: dict, ctx: ValidationCatalog) -> tuple[GameEventDef 
     result_pool = tuple(_build_result(item, f"result_pool[{i}]", ctx, errors) for i, item in enumerate(raw.get("result_pool", ())))
     result_pool = tuple(r for r in result_pool if r is not None)
 
+    # variants 允许留空：命中时没有预先写好的文案，PlayTurnService._ensure_variants
+    # 会现场调 LlmEventWriter 补一句并存回去（见 model/services/live_narrative_writer.py，
+    # 对应 README 对局第二段表格的 LlmEventWriter）。不再要求"至少 1 条"。
     variants_raw = raw.get("variants", ())
-    if not variants_raw:
-        errors.append(FieldError("variants", "至少要求 1 条默认文案"))
     variants = []
     for i, v in enumerate(variants_raw):
         text = v.get("text", "")
@@ -142,6 +143,11 @@ def validate_event_def(raw: dict, ctx: ValidationCatalog) -> tuple[GameEventDef 
         schema_version=int(raw.get("schema_version", 1)),
         is_draft=bool(raw.get("is_draft", True)),
         is_command=bool(raw.get("is_command", False)),
+        predicate_text=str(raw.get("predicate_text") or ""),
+        # predicate_embedding 由调用方（admin_controller.py）算好传进来——本函数
+        # 是纯结构校验，不做任何 I/O，向量化需要真的调 EmbeddingPort。
+        predicate_embedding=tuple(raw.get("predicate_embedding") or ()),
+        result_text=str(raw.get("result_text") or ""),
     )
     return defn, []
 

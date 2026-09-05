@@ -2,11 +2,16 @@
 
 reweight_and_pick 只做规则新颖度；V2 的向量新颖度以同一函数签名的装饰器/包装形式
 叠加一个相似度乘子，不改这个函数本身（1.4.3"是同一步的两个乘子，不是两套系统"）。
-"""
+
+predicate_text 分支（用户显式要求：事件"触发条件"允许写成自然语言，用向量相似度
+判定代替结构化谓词比较）是对 README 1.4.1"向量补盲区、不替代规则"定位的一次有意识
+偏离——预计算好的 predicate_embedding 只在 predicate 为空时才参与判定，e.predicate
+仍然是精确判定的硬条件（money_gte 这类不能模糊），两者不冲突。"""
 from __future__ import annotations
 
+import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
@@ -15,6 +20,30 @@ if TYPE_CHECKING:
     from model.domain.events import GameEventDef
     from model.domain.predicates import EvalContext
     from model.domain.time import GameTime
+    from model.services.ports import EmbeddingPort
+
+# predicate_text 判定的相似度阈值——凭经验给的起始值，没有实测数据支撑，接入真实
+# embedding 模型后应该按实际相似度分布重新标定（见 tests/model/services/test_matching.py
+# 里几个向量判定用例的取值范围）。
+PREDICATE_SIMILARITY_THRESHOLD = 0.75
+
+
+def build_context_embedding(
+    embedding: "EmbeddingPort | None", *, location_type: str, realm: str, money: int, age: int
+) -> tuple[float, ...]:
+    """给 MatchContext.context_embedding 用：把当前情境的结构化字段拼成一句简短
+    文本再编码（README 1.4.1："状态上下文优先读结构化字段…避免每次把整段状态拼
+    进去再 embedding"，这里就是那个"结构化字段"版本，不是把叙事原文整段丢进去）。
+    embedding 为 None（向量模块关闭）或调用失败（网络/超时——这是活跃对局路径里
+    唯一一处会打外部网络的地方，绝不能让它崩掉整个回合）都返回空元组，
+    coarse_filter 见到空的 context_embedding 会 fail-open。"""
+    if embedding is None:
+        return ()
+    text = f"地点类型:{location_type} 境界:{realm} 金钱:{money} 年龄:{age}"
+    try:
+        return tuple(embedding.embed(text))
+    except Exception:
+        return ()
 
 
 @dataclass
@@ -27,13 +56,39 @@ class MatchContext:
     realm: str
     money: int
     causes: list["CauseLink"]
+    context_embedding: tuple[float, ...] = field(default_factory=tuple)
+    # 当前情境的向量表示，调用方（PlayTurnService 等）在这一回合开始时用 EmbeddingPort
+    # 算一次、传进来复用，不在这里每个候选事件各编码一次——README 1.4.1："状态上下文
+    # 优先读结构化字段…避免每次把整段状态拼进去再 embedding"。留空 = 向量模块关闭
+    # 或者本回合没算（fail-open，predicate_text 分支视为无条件，见 coarse_filter）。
+
+
+def cosine_similarity(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 def coarse_filter(
-    pool: list["GameEventDef"], ctx: MatchContext, eval_ctx: "EvalContext", history: "AgentEventHistory"
+    pool: list["GameEventDef"],
+    ctx: MatchContext,
+    eval_ctx: "EvalContext",
+    history: "AgentEventHistory",
+    similarity_threshold: float = PREDICATE_SIMILARITY_THRESHOLD,
 ) -> list["GameEventDef"]:
     """README 1.4.2 的粗筛全集：地点 / 时间 / 谓词 / 冷却 / 次数 / 互斥。
-    后三项是硬过滤，不能降级成权重乘子——冷却期内的事件必须彻底不出现。"""
+    后三项是硬过滤，不能降级成权重乘子——冷却期内的事件必须彻底不出现。
+
+    谓词判定分两种：e.predicate 非空时走精确判定（不变）；e.predicate 为空但
+    e.predicate_text 非空时走向量相似度判定——两边（事件的 predicate_embedding、
+    本回合的 ctx.context_embedding）都要有向量才能判，缺一边就是"向量模块关闭/
+    本回合没算"，fail-open 当无条件处理，不当"永远不满足"（否则写了自然语言条件
+    的草稿在没配置向量服务时会变成打不出来的死内容，比没有这个功能还糟）。"""
     blocked_tags = history.active_exclusive_tags(ctx.now)
     out = []
     for e in pool:
@@ -54,8 +109,12 @@ def coarse_filter(
             continue
         if blocked_tags & set(e.exclusive_tags):
             continue
-        if e.predicate is not None and not e.predicate.evaluate(eval_ctx):
-            continue
+        if e.predicate is not None:
+            if not e.predicate.evaluate(eval_ctx):
+                continue
+        elif e.predicate_text and e.predicate_embedding and ctx.context_embedding:
+            if cosine_similarity(e.predicate_embedding, ctx.context_embedding) < similarity_threshold:
+                continue
         out.append(e)
     return out
 

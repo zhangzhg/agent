@@ -4,7 +4,14 @@ import unittest
 from model.domain.agent import AgentEventHistory
 from model.domain.events import EventVariant, GameEventDef
 from model.domain.predicates import Predicate, PredicateGroup, PredicateType
-from model.services.matching import MatchContext, coarse_filter, pick_variant, reweight_and_pick
+from model.services.matching import (
+    MatchContext,
+    build_context_embedding,
+    coarse_filter,
+    cosine_similarity,
+    pick_variant,
+    reweight_and_pick,
+)
 from tests.helpers import make_time
 
 
@@ -113,6 +120,58 @@ class CoarseFilterTests(unittest.TestCase):
         pool = [_def("chain_only", weight=0.0)]
         self.assertEqual(coarse_filter(pool, self.mctx, self.ctx, history), [])
 
+    def test_predicate_text_high_similarity_included(self):
+        history = AgentEventHistory()
+        pool = [_def("e1", predicate_text="有钱", predicate_embedding=(1.0, 0.0))]
+        mctx = MatchContext(
+            location="jiuguan", location_type="酒楼", time_shichen=self.now.shichen, now=self.now,
+            age=20, realm="凡人", money=10, causes=[], context_embedding=(1.0, 0.0),
+        )
+        self.assertEqual([e.event_id for e in coarse_filter(pool, mctx, self.ctx, history)], ["e1"])
+
+    def test_predicate_text_low_similarity_excluded(self):
+        history = AgentEventHistory()
+        pool = [_def("e1", predicate_text="有钱", predicate_embedding=(1.0, 0.0))]
+        mctx = MatchContext(
+            location="jiuguan", location_type="酒楼", time_shichen=self.now.shichen, now=self.now,
+            age=20, realm="凡人", money=10, causes=[], context_embedding=(0.0, 1.0),  # 正交向量，相似度 0
+        )
+        self.assertEqual(coarse_filter(pool, mctx, self.ctx, history), [])
+
+    def test_predicate_text_without_context_embedding_fails_open(self):
+        """向量模块关闭（本回合没算 context_embedding）时，写了自然语言条件的事件
+        不能变成打不出来的死内容——按无条件处理。"""
+        history = AgentEventHistory()
+        pool = [_def("e1", predicate_text="有钱", predicate_embedding=(1.0, 0.0))]
+        # self.mctx 没有设 context_embedding，默认空元组
+        self.assertEqual([e.event_id for e in coarse_filter(pool, self.mctx, self.ctx, history)], ["e1"])
+
+    def test_structured_predicate_takes_priority_over_predicate_text(self):
+        """两者都写了：predicate 精确判定优先，predicate_text 完全不参与——即使
+        向量相似度会说"满足"，precise predicate 说不满足就是不满足。"""
+        history = AgentEventHistory()
+        pool = [_def(
+            "e1",
+            predicate=PredicateGroup("AND", (Predicate(PredicateType.MONEY_GTE, (999,)),)),
+            predicate_text="随便什么", predicate_embedding=(1.0, 0.0),
+        )]
+        mctx = MatchContext(
+            location="jiuguan", location_type="酒楼", time_shichen=self.now.shichen, now=self.now,
+            age=20, realm="凡人", money=10, causes=[], context_embedding=(1.0, 0.0),
+        )
+        self.assertEqual(coarse_filter(pool, mctx, self.ctx, history), [])
+
+    def test_predicate_text_without_own_embedding_fails_open(self):
+        """事件写了 predicate_text 但从没算出 predicate_embedding（比如保存那一刻
+        向量服务不可用）——同样按无条件处理，不当"永远不满足"。"""
+        history = AgentEventHistory()
+        pool = [_def("e1", predicate_text="有钱", predicate_embedding=())]
+        mctx = MatchContext(
+            location="jiuguan", location_type="酒楼", time_shichen=self.now.shichen, now=self.now,
+            age=20, realm="凡人", money=10, causes=[], context_embedding=(1.0, 0.0),
+        )
+        self.assertEqual([e.event_id for e in coarse_filter(pool, mctx, self.ctx, history)], ["e1"])
+
 
 class RewardPickTests(unittest.TestCase):
     def test_reweight_and_pick_empty_returns_none(self):
@@ -146,6 +205,52 @@ class RewardPickTests(unittest.TestCase):
     def test_pick_variant_single_variant_is_zero(self):
         defn = _def("e1", variants=(EventVariant("only"),))
         self.assertEqual(pick_variant(defn, AgentEventHistory(), random.Random()), 0)
+
+
+class CosineSimilarityTests(unittest.TestCase):
+    def test_identical_vectors_similarity_one(self):
+        self.assertAlmostEqual(cosine_similarity((1.0, 2.0, 3.0), (1.0, 2.0, 3.0)), 1.0)
+
+    def test_orthogonal_vectors_similarity_zero(self):
+        self.assertAlmostEqual(cosine_similarity((1.0, 0.0), (0.0, 1.0)), 0.0)
+
+    def test_opposite_vectors_similarity_negative_one(self):
+        self.assertAlmostEqual(cosine_similarity((1.0, 0.0), (-1.0, 0.0)), -1.0)
+
+    def test_empty_vector_returns_zero_not_raises(self):
+        self.assertEqual(cosine_similarity((), (1.0, 2.0)), 0.0)
+        self.assertEqual(cosine_similarity((1.0,), ()), 0.0)
+
+    def test_mismatched_length_returns_zero(self):
+        self.assertEqual(cosine_similarity((1.0, 2.0), (1.0, 2.0, 3.0)), 0.0)
+
+    def test_zero_vector_returns_zero_not_divide_by_zero(self):
+        self.assertEqual(cosine_similarity((0.0, 0.0), (1.0, 1.0)), 0.0)
+
+
+class BuildContextEmbeddingTests(unittest.TestCase):
+    def test_none_embedding_port_returns_empty_tuple(self):
+        self.assertEqual(
+            build_context_embedding(None, location_type="酒楼", realm="凡人", money=10, age=20), ()
+        )
+
+    def test_embedding_port_result_is_used(self):
+        class FakeEmbedding:
+            def embed(self, text):
+                return [1.0, 2.0, 3.0]
+
+        result = build_context_embedding(FakeEmbedding(), location_type="酒楼", realm="凡人", money=10, age=20)
+        self.assertEqual(result, (1.0, 2.0, 3.0))
+
+    def test_embedding_failure_returns_empty_tuple_not_raises(self):
+        """活跃对局路径里唯一一处会打外部网络的地方——网络挂了/超时绝不能崩掉
+        整个回合，得退化成空向量（fail-open）。"""
+        class FailingEmbedding:
+            def embed(self, text):
+                raise ConnectionError("网络超时")
+
+        result = build_context_embedding(FailingEmbedding(), location_type="酒楼", realm="凡人", money=10, age=20)
+        self.assertEqual(result, ())
 
 
 if __name__ == "__main__":

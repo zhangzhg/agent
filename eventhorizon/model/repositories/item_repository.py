@@ -19,6 +19,7 @@ def _item_to_dict(item: ItemDef) -> dict:
         "unique": item.unique,
         "name": item.name,
         "description": item.description,
+        "embedding": list(item.embedding),
     }
 
 
@@ -30,6 +31,7 @@ def _item_from_dict(d: dict) -> ItemDef:
         unique=d.get("unique", False),
         name=d.get("name", ""),
         description=d.get("description", ""),
+        embedding=tuple(d.get("embedding") or ()),
     )
 
 

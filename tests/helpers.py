@@ -70,7 +70,10 @@ class FakeScenarioRepository:
         return self._graphs.get(scenario_id)
 
 
-def make_play_turn(events, scenarios=None, bus=None, log=None, clock=None, parser=None, rng=None, balance=None):
+def make_play_turn(
+    events, scenarios=None, bus=None, log=None, clock=None, parser=None, rng=None, balance=None,
+    embedding=None, narrative_writer=None,
+):
     """按 bootstrap.py 同样的接线方式，只是用测试用的内存仓库/固定 rng，方便
     §9 测试策略里"内存假仓库 + 固定 rng"的写法。"""
     from model.services.arbiter import EventArbiter
@@ -95,4 +98,7 @@ def make_play_turn(events, scenarios=None, bus=None, log=None, clock=None, parse
         if not alias_map and hasattr(events, "_events"):
             alias_map = {alias: e.event_id for e in events._events.values() if e.is_command for alias in e.aliases}
         parser = ChatParser(alias_map)
-    return PlayTurnService(bus, EventArbiter(), pipeline, parser, events, scenarios, rng, log, clock)
+    return PlayTurnService(
+        bus, EventArbiter(), pipeline, parser, events, scenarios, rng, log, clock,
+        embedding=embedding, narrative_writer=narrative_writer,
+    )
