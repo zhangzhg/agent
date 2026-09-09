@@ -207,6 +207,15 @@
 | 录入 | 手填，或 `LlmEventAuthor` 生成草稿 → 校验 → 发布 | 同左，可加批量/向量去重 |
 
 *   **模型不得**：对局中改存档；不经草稿发布就进合格池；发明未注册物品却当正式结果。
+
+**例外（有意识的产品决策，非疏漏）**：`LiveContentAuthor`
+（`model/services/live_content_author.py`）专门服务于"规则解析器 `ChatParser`
+和向量意图兜底（`matching.py::find_best_matching_command`）都处理不了玩家这句
+话"这一个场景——玩家明确要求"实时调用大模型、结果立即生效"，接受不经人工审核
+的代价。它创作的新命令型事件/新地点确实立即落库生效，不经草稿发布。跟
+`LlmAuthorPort`（仍然只限录入侧，仍然禁止出现在对局路径，见
+`tests/test_layering.py`）是两个不同的东西，不要混淆：`LlmAuthorPort` 那条隔离
+边界没有变，`LiveContentAuthor` 是给它的一个新的、命名和职责都不同的旁路。
 ---
 ## 第二部分：游戏设计
 ### 2.1 游戏概述

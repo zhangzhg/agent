@@ -102,4 +102,92 @@ MOUNTAIN_GATE_TEST = GameEventDef(
     is_draft=False,
 )
 
-ALL = (SECT_TRAINING, ELDER_INSIGHT, SECT_RIVALRY, FOUND_MANUAL, MOUNTAIN_GATE_TEST)
+SPARRING_MATCH = GameEventDef(
+    event_id="sparring_match",
+    applicable_locations=("山门",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.FLAG, ("有门派归属",)),)),
+    weight=1.5,
+    duration_shichen=0,
+    cooldown_shichen=48,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("修炼", "社交"),
+    aliases=(),
+    result_pool=(StateChange(field="cultivation", delta=4), StateChange(field="heart_demon", delta=-0.01)),
+    variants=(
+        EventVariant("同门师弟邀你切磋一场，点到即止，倒也印证了不少心得。"),
+        EventVariant("演武场上你与一位师兄过了几招，输赢不论，收获不小。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+SENIOR_ADVICE = GameEventDef(
+    event_id="senior_advice",
+    applicable_locations=("山门",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.FLAG, ("有门派归属",)),)),
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=72,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交",),
+    aliases=(),
+    result_pool=(StateChange(field="heart_demon", delta=-0.02),),
+    variants=(
+        EventVariant("一位入门更早的师兄见你面露疲态，宽慰了你几句。"),
+        EventVariant("师姐路过时随口指点了你几句为人处世的道理。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+KITCHEN_DUTY = GameEventDef(
+    event_id="kitchen_duty",
+    applicable_locations=("山门",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.FLAG, ("有门派归属",)),)),
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=24,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("生活",),
+    aliases=(),
+    result_pool=(StateChange(field="satiety", delta=10),),
+    variants=(
+        EventVariant("轮到你在膳堂帮厨，忙活一阵后蹭了顿热乎饭。"),
+        EventVariant("师门膳堂管事多给了你一勺菜，说是犒劳你今日出力。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+NEW_DISCIPLE_WELCOME = GameEventDef(
+    event_id="new_disciple_welcome",
+    applicable_locations=("山门",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.FLAG, ("有门派归属",)),)),
+    weight=0.8,
+    duration_shichen=0,
+    cooldown_shichen=200,
+    max_trigger_per_agent=1,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交", "奇遇"),
+    aliases=(),
+    result_pool=(WriteCause(tag="知己", target="新入门师弟", expires_years=None),),
+    variants=(EventVariant("一位新入门的小师弟怯生生地找你请教，你耐心指点了几句。"),),
+    is_command=False,
+    is_draft=False,
+)
+
+ALL = (
+    SECT_TRAINING, ELDER_INSIGHT, SECT_RIVALRY, FOUND_MANUAL, MOUNTAIN_GATE_TEST,
+    SPARRING_MATCH, SENIOR_ADVICE, KITCHEN_DUTY, NEW_DISCIPLE_WELCOME,
+)

@@ -26,6 +26,7 @@ from model.repositories.llm.llm_item_author import LlmItemAuthor
 from model.repositories.llm.llm_location_author import LlmLocationAuthor
 from model.repositories.llm.llm_result_text_parser import LlmResultTextParser
 from model.repositories.llm.openai_compatible_client import OpenAiCompatibleClient
+from model.services.local_embedding import FallbackEmbeddingClient
 from view.schemas.web_schemas import (
     CalendarPanelDTO,
     ChatApiRequest,
@@ -56,10 +57,12 @@ def create_app(db_path: str | None = None) -> FastAPI:
     llm_config = load_llm_config()
     llm_client = OpenAiCompatibleClient(llm_config) if llm_config.configured else None
     # embed() 和 complete() 用的是同一个 OpenAiCompatibleClient 实例（同一个连接，
-    # 两种能力）；只有 embedding_model 也配了才把它当 EmbeddingPort 接进对局路径
-    # （PlayTurnService 的 predicate_text 向量判定），没配就是 None，等同于向量
-    # 模块关闭（fail-open，见 model/services/matching.py）。
-    embedding_client = llm_client if llm_config.embedding_configured else None
+    # 两种能力）；FallbackEmbeddingClient 包一层三层兜底链（GLM -> 本地模型
+    # BAAI/bge-small-zh-v1.5 -> 字符哈希，见 model/services/local_embedding.py），
+    # 永远不是 None——GLM 没配置/没有 embedding 额度（这个账号目前就是如此）时
+    # 自动落到本地模型，predicate_text 向量判定、物品匹配、事件叙事重排各处
+    # 原有的"向量模块关闭"fail-open 分支不会再触发。
+    embedding_client = FallbackEmbeddingClient(llm_client if llm_config.embedding_configured else None)
     # narrative_writer 复用同一个 complete()——LlmEventWriter（README 对局第二段
     # 表格）：事件命中但 variants 留空时现场补一句文案，见 PlayTurnService._ensure_variants。
 
@@ -70,7 +73,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         # 越滚越多重复；events/items 也会把用户在编辑器里改过的同 id 内容悄悄
         # 冲回种子原文，两种都不是"重启后应该发生的事"。
         seed_all(app_ctx)
-    controller = ChatController(app_ctx.agent_repo, app_ctx.world_repo, app_ctx.play_turn, app_ctx.events)
+    controller = ChatController(app_ctx.agent_repo, app_ctx.world_repo, app_ctx.play_turn, app_ctx.events, rng=app_ctx.rng)
 
     fastapi_app = FastAPI(title="太一仙途")
     fastapi_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")  # theme.css 等两页共用资源

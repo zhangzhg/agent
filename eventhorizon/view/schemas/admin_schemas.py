@@ -152,6 +152,10 @@ class EventDetailDTO(BaseModel):
     # "结果"的自然语言描述（编辑器表单用它替代 result_pool JSON 输入框）——保存时
     # 后端尝试解析出其中的数值得失写回 result_pool；解析不出/没配置 LLM 时纯当
     # 描述文字存着，不报错。
+    narrative_embedding: list[float] = Field(default_factory=list)
+    # 只读、页面不展示：tags+aliases+variants 文案拼接后的向量，由后端在保存时
+    # 算好，用于对局里的事件叙事贴切度重排（model/services/matching.py）——跟
+    # predicate_embedding 是两份不同的向量，不要混用。
 
 
 class SaveEventResponse(BaseModel):

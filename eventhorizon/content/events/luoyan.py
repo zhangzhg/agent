@@ -102,4 +102,89 @@ LOST_CHILD = GameEventDef(
     is_draft=False,
 )
 
-ALL = (RARE_HERB_DEAL, CARAVAN_ARRIVAL, COUNTERFEIT_PILL, DEBT_COLLECTOR, LOST_CHILD)
+SILK_MERCHANT = GameEventDef(
+    event_id="silk_merchant",
+    applicable_locations=("集市",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.MONEY_GTE, (8,)),)),
+    weight=1.5,
+    duration_shichen=0,
+    cooldown_shichen=60,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("生活",),
+    aliases=(),
+    result_pool=(StateChange(field="money", delta=-8), ItemDrop(item_id="cloth_pouch", n=1)),
+    variants=(
+        EventVariant("绸缎庄的伙计极力推销一匹新到的料子，你被说动买了些。"),
+        EventVariant("布庄老板娘手脚麻利地给你裁了块布料，说是压箱底的好货。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+BANDIT_RUMOR = GameEventDef(
+    event_id="bandit_rumor",
+    applicable_locations=("集市", "城市"),
+    applicable_time=None,
+    predicate=None,
+    weight=1.5,
+    duration_shichen=0,
+    cooldown_shichen=48,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交", "奇遇"),
+    aliases=(),
+    result_pool=(StateChange(field="scene_focus", set_to="黑风谷"),),
+    variants=(
+        EventVariant("镖师们聚在一起低声议论，说黑风谷那边又出了妖兽伤人的事。"),
+        EventVariant("有人说前几日一支商队在黑风谷附近折损了不少货物。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+OLD_FRIEND_LETTER = GameEventDef(
+    event_id="old_friend_letter",
+    applicable_locations=("城市",),
+    applicable_time=None,
+    predicate=None,
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=200,
+    max_trigger_per_agent=1,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交",),
+    aliases=(),
+    result_pool=(WriteCause(tag="知己", target="远方旧友", expires_years=None),),
+    variants=(EventVariant("驿站送来一封辗转多时的书信，是一位远方旧友的问候。"),),
+    is_command=False,
+    is_draft=False,
+)
+
+APPRAISAL_MISHAP = GameEventDef(
+    event_id="appraisal_mishap",
+    applicable_locations=("集市",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.HAS_ITEM, ("cloth_pouch",)),)),
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=96,
+    max_trigger_per_agent=1,
+    exclusive_tags=(),
+    priority=5,
+    tags=("奇遇",),
+    aliases=(),
+    result_pool=(ItemDrop(item_id="gold", n=1),),
+    variants=(EventVariant("鉴宝师翻看你随身的布袋，惊讶地说里面混进了一件金饰。"),),
+    is_command=False,
+    is_draft=False,
+)
+
+ALL = (
+    RARE_HERB_DEAL, CARAVAN_ARRIVAL, COUNTERFEIT_PILL, DEBT_COLLECTOR, LOST_CHILD,
+    SILK_MERCHANT, BANDIT_RUMOR, OLD_FRIEND_LETTER, APPRAISAL_MISHAP,
+)

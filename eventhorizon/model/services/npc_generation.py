@@ -91,4 +91,5 @@ def generate_npc(params: NpcGenerationParams, rng: random.Random | None = None) 
         luck=generate_luck(rng),
         insight=generate_luck(rng),  # 悟性沿用同一套均匀分布，文档未给出独立公式
         origin=origin,
+        is_npc=True,
     )

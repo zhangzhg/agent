@@ -10,7 +10,9 @@ GameEventOccurrence（或先 publish 命令意图，由本服务订阅后补全�
 """
 from __future__ import annotations
 
+import logging
 import random
+import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -19,12 +21,18 @@ from model.domain.events import EventVariant, GameEventOccurrence, TriggerSource
 from model.domain.results import StateChange
 from model.domain.system_events import AgentStateChanged
 from model.services.arbiter import ArbitrationDecision, EventArbiter
-from model.services.chat_parser import MOVE_EVENT_ID, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
+from model.services.chat_parser import MOVE_EVENT_ID, ParsedCommand, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
+from model.services.event_validation import ValidationCatalog, validate_event_def
+from model.services.live_content_author import LiveContentAuthor
 from model.services.live_narrative_writer import generate_live_variant_text
 from model.services.matching import (
     MatchContext,
     build_context_embedding,
+    build_narrative_context_text,
     coarse_filter,
+    embed_safely,
+    find_best_matching_command,
+    narrative_fit_multiplier,
     pick_variant,
     reweight_and_pick,
     tidal_beast_weight_multiplier,
@@ -37,12 +45,24 @@ if TYPE_CHECKING:
     from model.domain.agent import Agent
     from model.domain.balance import BalanceTable
     from model.domain.events import GameEventDef
-    from model.domain.map import WorldView
+    from model.domain.map import Location, WorldView
     from model.services.chat_parser import ChatParser
     from model.services.clock_service import GameClock, RetreatService
     from model.services.event_bus import EventBus
     from model.services.live_narrative_writer import LlmClient
     from model.services.ports import EmbeddingPort, EventLogStore, EventRepository, ScenarioRepository
+
+_logger = logging.getLogger("eventhorizon.play_turn")
+
+
+def _looks_like_gibberish(text: str) -> bool:
+    """LiveContentAuthor 调用前的廉价本地兜底：GLM 配的小模型（glm-4-flash）就算
+    prompt 里明确要求"说不通就拒绝"，实测对着纯乱码（"asdkjhaskjdh"这种）也会
+    硬编一个场景出来，不肯拒绝——提示词管不住的部分，先在本地挡一层最明显的：
+    一个汉字都没有，基本不可能是有意义的游戏内动作描述。不追求完美（"合理但
+    无意义的中文"这类还是会被模型编出东西来，是用户已经知情接受的代价，见
+    README §1.12 的 LiveContentAuthor 例外说明），只挡最便宜能挡住的那一档。"""
+    return not any("一" <= ch <= "鿿" for ch in text)
 
 _RETREAT_PROMPT_TEXT = '要闭关多久？（可以说"十年""到金丹为止"或"随便"）'
 _RETREAT_UNPARSEABLE_TEXT = '没听懂要闭关多久，你可以说"十年""到金丹为止"或"随便"。'
@@ -83,6 +103,11 @@ class PlayTurnService:
         # 对局第二段表格），事件命中但 variants 为空时现场补一句文案，见
         # _ensure_variants()。README 5.3 对局隔离针对的是"录入侧大模型草稿生成"那个
         # 端口，不是这两个——V2 向量匹配/LlmEventWriter 本来就该在对局路径里用。
+        # LiveContentAuthor 复用同一个 narrative_writer 客户端（同一个 LlmClient
+        # Protocol），是解析彻底失败（规则 + 向量都没匹配上）时的最后一层兜底，
+        # 见 handle_player_text/_handle_move——README §1.12 的一次有意识例外，
+        # 用户已明确要求，见 live_content_author.py 顶部说明。
+        self._live_content_author = LiveContentAuthor(narrative_writer) if narrative_writer is not None else None
         self.bus.subscribe(GameEventOccurrence, self._on_occurrence_published)
 
     def _ensure_variants(self, defn: "GameEventDef") -> "GameEventDef":
@@ -141,8 +166,12 @@ class PlayTurnService:
                 return resolved
             self._abandon_pending(agent)  # 玩家改主意：挂起项按"错过"清掉，经 diff 落库
 
-        # 2) 常规命令
+        # 2) 常规命令：规则解析器 -> 向量意图兜底 -> 实时大模型创作，三层依次尝试
         cmd = self.parser.parse(raw, agent.scene_focus)
+        if cmd is None:
+            cmd = self._match_command_by_intent(raw, agent)
+        if cmd is None:
+            cmd = self._author_live_command(agent, raw)
         if cmd is None:
             return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
         if cmd.is_query or cmd.event_id in QUERY_EVENT_IDS:
@@ -172,20 +201,143 @@ class PlayTurnService:
         examples_text = "或".join(f'"{a}"' for a in examples)
         return f"听不懂，要不试试{examples_text}？"
 
+    def _match_command_by_intent(self, raw: str, agent: "Agent") -> "ParsedCommand | None":
+        """chat_parser.py 别名精确/子串匹配失败后的向量兜底（chat_parser.py 自己
+        文档里"V2 上向量匹配"那条既定路线图，不是新方向）——"吃点东西"这类自然
+        语言，跟当前地点已发布命令型事件的 narrative_embedding 比语义相似度。
+        embedding 未配置/调用失败都自然返回空向量，find_best_matching_command
+        见到空查询向量直接判不命中（fail-closed，不影响现有行为）。"""
+        pool = [e for e in self.events.load_event_defs(agent.location_type) if e.is_command and not e.is_draft]
+        pool = [self._ensure_narrative_embedding(e) for e in pool]
+        query = embed_safely(self.embedding, raw)
+        matched = find_best_matching_command(pool, query)
+        if matched is None:
+            return None
+        return ParsedCommand(event_id=matched.event_id, location_hint=None, target=None, args={})
+
+    def _ensure_narrative_embedding(self, defn: "GameEventDef") -> "GameEventDef":
+        """跟 _ensure_variants 同一个"缺了就现算一次、存回仓库"套路：内容库里
+        手工/AI 录入的事件保存时（admin_controller.py::save_event）已经算好
+        narrative_embedding 了，但 content/events/*.py 里那些随游戏内置、走
+        seed_all() 直接 save_event_def() 落库的命令（吃饭/打坐这些）从来没经过
+        那条计算路径，narrative_embedding 天生是空的——不补上这一步，向量意图
+        兜底对着游戏自带的命令永远匹配不上，"吃点东西"这类自然语言只会一直
+        "听不懂"。只在真的要用到向量匹配（chat_parser 精确匹配已经失败）时才算，
+        不在每次装载事件池时都算一遍。"""
+        if defn.narrative_embedding:
+            return defn
+        text = " ".join(list(defn.tags) + list(defn.aliases) + [v.text for v in defn.variants]).strip()
+        if not text:
+            return defn
+        patched = replace(defn, narrative_embedding=embed_safely(self.embedding, text))
+        self.events.save_event_def(patched)
+        return patched
+
+    def _author_live_command(self, agent: "Agent", raw: str) -> "ParsedCommand | None":
+        """规则解析 + 向量兜底都没命中——最后一层：实时调大模型创作一条新命令型
+        事件，立即落库生效（LiveContentAuthor，README §1.12 的有意识例外，见
+        live_content_author.py 顶部说明）。没配置大模型（self._live_content_author
+        为 None）直接跳过，走原有"听不懂"。"""
+        if self._live_content_author is None or _looks_like_gibberish(raw):
+            return None
+        raw_event = self._live_content_author.author_command_event(raw, agent.location_type)
+        if raw_event is None:
+            return None
+        event_id = "live_" + uuid.uuid4().hex[:10]
+        raw_event = {
+            **raw_event,
+            "event_id": event_id,
+            "applicable_locations": [agent.location_type],
+            "predicate": None,
+            "aliases": list(dict.fromkeys([*raw_event.get("aliases", []), raw.strip()])),
+            # LlmEventFlavorAuthor 的 variants 是纯字符串列表，validate_event_def
+            # 要的是 {"text":..., "weight":...} 字典——跟 admin_controller.py::
+            # generate_events 里同样的转换，两处生成器共用的是同一个 Author，输出
+            # 形状必须一致处理。
+            "variants": [{"text": text, "weight": 1.0} for text in raw_event.get("variants", [])],
+            "is_draft": False,
+            "is_command": True,
+        }
+        # load_event_defs(None) 不是 list_all()：list_all() 明确标注"只供录入编辑器
+        # 用，对局路径必须走 load_event_defs()"（草稿会被过滤掉），这里虽然只是拿
+        # id 集合做联动校验，也不该破例。
+        catalog = ValidationCatalog(known_event_ids={e.event_id for e in self.events.load_event_defs(None)})
+        defn, errors = validate_event_def(raw_event, catalog)
+        if defn is None:
+            _logger.warning("实时创作的事件没通过校验：%s", errors)
+            return None
+        # 跟 admin_controller.py::save_event 同样的 narrative_embedding 计算方式
+        # （tags+aliases+variants 拼接），不然这条实时创作的事件以后碰到相似但不
+        # 完全相同的措辞时，_match_command_by_intent 的向量兜底找不到它。
+        narrative_text = " ".join(
+            list(raw_event.get("tags") or [])
+            + list(raw_event.get("aliases") or [])
+            + [v["text"] for v in raw_event.get("variants") or []]
+        ).strip()
+        if narrative_text:
+            defn = replace(defn, narrative_embedding=embed_safely(self.embedding, narrative_text))
+        self.events.save_event_def(defn)
+        return ParsedCommand(event_id=defn.event_id, location_hint=None, target=None, args={})
+
     # ---------- 系统命令：move / retreat_start（GAME_DESIGN §3.1，非库内事件）----------
     def _handle_move(self, agent: "Agent", world: "WorldView", cmd) -> TurnResult:
         if agent.state.name != "idle":
             return TurnResult.rejected("现在走不开。")
         destination = world.find_location_by_name(cmd.location_hint) if cmd.location_hint else None
+        if destination is None and cmd.location_hint:
+            outcome = self._author_live_destination(agent, world, cmd.location_hint)
+            if outcome is not None:
+                if isinstance(outcome, TurnResult):
+                    return outcome  # 外部地点：新建了隐藏节点，但这一步不移动
+                destination = outcome  # 内部子地点：新建完直接当成这次移动的目的地
         if destination is None:
             hint = cmd.location_hint or "那里"
             return TurnResult.rejected(f"找不到「{hint}」这个地方。")
-        base = self._ensure_variants(self.events.get_by_id(MOVE_EVENT_ID) or _default_move_def())
+        base = self._ensure_variants(self.events.get_by_id(MOVE_EVENT_ID) or default_move_def())
         synthetic = replace(
             base, result_pool=(StateChange(field="location", set_to=destination.location_id),), predicate=None, is_command=True
         )
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, synthetic) or TurnResult.rejected("现在做不了这个。")
+
+    def _author_live_destination(self, agent: "Agent", world: "WorldView", hint: str) -> "Location | TurnResult | None":
+        """`find_location_by_name` 找不到目的地时的最后一层兜底——实时创作一个新
+        地点（LiveContentAuthor，README §1.12 的有意识例外，见 live_content_author.py
+        顶部说明）。返回 `Location` 表示"内部子地点，新建完直接当这次移动的目的
+        地"；返回 `TurnResult` 表示"外部地点，新建了隐藏节点但这次不移动"；返回
+        `None` 表示模型判断这句话说不通/没配置大模型，调用方回落原有"找不到"文案。
+
+        新地点/新路线直接写进 `world.mutable_state()`——不需要额外接线持久化：
+        `world` 是 ChatController 每回合传进来的同一个引用，回合结束后
+        ChatController 本来就会无条件 `world_repo.save(...)`（chat_controller.py），
+        这里改了内存里的 WorldState，会跟着这次回合一起整份存盘。"""
+        if self._live_content_author is None or _looks_like_gibberish(hint):
+            return None
+        state = world.mutable_state()
+        current = state.get(agent.location_id)
+        current_name = world.name_of(agent.location_id)
+        current_type = world.location_type_of(agent.location_id)
+        decision = self._live_content_author.author_location(hint, current_name, current_type)
+        if decision is None:
+            return None
+        from model.domain.map import Location, LocationKind, Route
+
+        new_id = "loc_" + uuid.uuid4().hex[:10]
+        if decision.is_internal:
+            parent_id = current.parent_location_id if current is not None and current.parent_location_id else agent.location_id
+            new_location = Location(
+                location_id=new_id, name=decision.name, kind=LocationKind(decision.kind),
+                location_type=decision.location_type, parent_location_id=parent_id, hidden=False, discovered=True,
+            )
+            state.locations[new_id] = new_location
+            state.routes.append(Route(from_id=agent.location_id, to_id=new_id, bidirectional=True))
+            return new_location
+        new_location = Location(
+            location_id=new_id, name=decision.name, kind=LocationKind(decision.kind),
+            location_type=decision.location_type, parent_location_id=None, hidden=True, discovered=False,
+        )
+        state.locations[new_id] = new_location
+        return TurnResult.rejected(f"「{decision.name}」虽有耳闻，但眼下尚未对外开放，暂时去不了。")
 
     def _handle_retreat_start(self, agent: "Agent") -> TurnResult:
         if self.retreat is None or self.balance is None:
@@ -212,6 +364,18 @@ class PlayTurnService:
         return TurnResult(
             retreat_summary=summary, retreat_before_realm=before_realm, retreat_before_cultivation=before_cultivation
         )
+
+    # ---------- 系统触发源复用入口（日程/其它非玩家来源）----------
+    def trigger(
+        self, agent: "Agent", world: "WorldView", defn: "GameEventDef", source: TriggerSource
+    ) -> TurnResult | None:
+        """给 schedule_service 等系统触发源一个公开入口，复用同一条
+        execute_occurrence 路径——不止 handle_player_text 能进两段式流水线（README
+        1.5.2："以 TriggerSource=schedule 走 execute_occurrence，与玩家侧同一条路径"）。
+        变体选择同样走 pick_variant，不是恒 0。"""
+        defn = self._ensure_variants(defn)
+        occ = self._new_occurrence(agent, defn, source)
+        return self.execute_occurrence(agent, world, occ, defn)
 
     # ---------- 单条事件结算：总线订阅、日程、连锁共用 ----------
     def execute_occurrence(
@@ -261,11 +425,12 @@ class PlayTurnService:
     # ---------- 第二段：按新状态抽库内事件 ----------
     def _second_stage(self, agent: "Agent", world: "WorldView", first: TurnResult) -> TurnResult:
         pool = [e for e in self.events.load_event_defs(agent.location_type) if not e.is_command]
+        now = self.clock.now()
         mctx = MatchContext(
             location=agent.location_id,
             location_type=agent.location_type,
-            time_shichen=self.clock.now().shichen,
-            now=self.clock.now(),
+            time_shichen=now.shichen,
+            now=now,
             age=agent.age,
             realm=agent.realm,
             money=agent.money,
@@ -273,12 +438,18 @@ class PlayTurnService:
             context_embedding=build_context_embedding(
                 self.embedding, location_type=agent.location_type, realm=agent.realm, money=agent.money, age=agent.age
             ),
+            narrative_context_embedding=embed_safely(
+                self.embedding,
+                build_narrative_context_text(
+                    location=agent.location_id, location_type=agent.location_type, realm=agent.realm,
+                    money=agent.money, age=agent.age, time_shichen=now.shichen, flags=agent.flags,
+                ),
+            ),
         )
         candidates = coarse_filter(pool, mctx, agent.as_eval_context(world), agent.event_history)
-        now = self.clock.now()
         picked = reweight_and_pick(
             candidates, agent.event_history, self.rng,
-            extra_weight=lambda e: tidal_beast_weight_multiplier(e, now),
+            extra_weight=lambda e: tidal_beast_weight_multiplier(e, now) * narrative_fit_multiplier(e, mctx),
         )
         if picked is None:
             return first  # 抽空：酒楼无事，状态已由上一步 settle
@@ -461,9 +632,13 @@ def _blank_event_def(node_id: str) -> "GameEventDef":
     )
 
 
-def _default_move_def() -> "GameEventDef":
+def default_move_def() -> "GameEventDef":
     """content 侧没有注册 event_id="move" 的兜底（GAME_DESIGN §3.1："去{地点}"是
-    系统命令，不强依赖内容库；有内容库版本时优先用它的谓词/时长/变体文案）。"""
+    系统命令，不强依赖内容库；有内容库版本时优先用它的谓词/时长/变体文案）。
+    公开（不带下划线前缀）：chat_controller.py 渲染叙述时也要能拿到同一份定义——
+    _handle_move 用的是它合成出来的 GameEventDef，不是 events 仓库里的真实记录，
+    controller 侧按 event_id 查仓库是查不到的，两边必须用同一个兜底函数，不能各
+    编一份、内容还可能对不上。"""
     from model.domain.events import EventVariant, GameEventDef
 
     return GameEventDef(

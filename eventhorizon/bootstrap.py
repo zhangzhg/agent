@@ -35,6 +35,7 @@ from model.services.pipeline import default_pipeline
 from model.services.play_turn import PlayTurnService
 from model.services.live_narrative_writer import LlmClient
 from model.services.ports import EmbeddingPort
+from model.services.schedule_service import ScheduleService
 
 
 @dataclass
@@ -65,6 +66,8 @@ class AppContext:
     retreat: RetreatService
     death_service: DeathService
     balance: BalanceTable
+    schedule_service: ScheduleService
+    rng: random.Random
 
 
 def build_app(
@@ -87,11 +90,15 @@ def build_app(
     scenarios = ScenarioRepositoryImpl()
     logs = SqliteEventLogStore(conn)
     snapshots = SqliteSnapshotStore(conn)
-    agent_repo = SqliteAgentRepository(snapshots, logs)
-    world_repo = SqliteWorldRepository(snapshots)
 
     now = seed_time or GameTime.new(Epoch.TAIYI, 100, 1, 1, 6)
     clock = GameClock(start=now, bus=bus)
+
+    # 快照行的 at 必须来自全局时钟，不能用某个 Agent 自己的 time_anchor——见
+    # agent_repository.py 顶部注释（NPC 的 duration_shichen=0 事件不会同步锚点，
+    # 用它当 at 会导致 replay_since 把历史重放到失真）。
+    agent_repo = SqliteAgentRepository(snapshots, logs, now_provider=clock.now)
+    world_repo = SqliteWorldRepository(snapshots)
 
     executor = ResultPoolExecutor(balance=balance, rng=rng, scenarios=scenarios)
     handler = GameEventHandler(executor)
@@ -108,7 +115,24 @@ def build_app(
     world_view = world_repo.assemble_view()
     world_state = world_view.mutable_state()
     bus.subscribe(MapUpdateEvent, MapUpdateHandler(world_state).handle)
-    bus.subscribe(TimePassEvent, TimePassHandler(world_state).handle)
+
+    # ScheduleService 的执行器只拿到 (agent, defn, source)（README 1.5.2 的信号），
+    # world/落盘由这个闭包负责补上——NPC 走的是 play_turn.trigger 同一条两段式
+    # 流水线，跑完了同样要 agent_repo.save()，否则巡检触发的状态变化只活在这次
+    # TimePassEvent 的调用栈里，下一次 load() 就没了。
+    def _schedule_executor(agent, defn, source) -> None:
+        play_turn.trigger(agent, world_repo.assemble_view(), defn, source)
+        agent_repo.save(agent)
+
+    schedule_service = ScheduleService(events, rng=rng, executor=_schedule_executor)
+    bus.subscribe(
+        TimePassEvent,
+        TimePassHandler(
+            world_state,
+            schedule_service=schedule_service,
+            agents_provider=lambda: [a for a in agent_repo.list_all() if a.is_npc],
+        ).handle,
+    )
 
     death_service = DeathService()
     bus.subscribe(DeathEvent, DeathHandler(death_service, agent_repo).handle)
@@ -129,6 +153,8 @@ def build_app(
         retreat=retreat,
         death_service=death_service,
         balance=balance,
+        schedule_service=schedule_service,
+        rng=rng,
     )
 
 

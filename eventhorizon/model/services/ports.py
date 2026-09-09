@@ -24,6 +24,11 @@ class AgentRepository(Protocol):
 
     def load(self, agent_id: str) -> "Agent": ...
     def save(self, agent: "Agent") -> None: ...
+    def list_all(self) -> "list[Agent]":
+        """schedule_service 的 agents_provider 用它筛选 is_npc 的 Agent 做日程巡检
+        （README 1.5.2）；单存档下"全部 Agent"就是最近快照里 agents 字典的全部键，
+        跟 load() 一样按各自的增量日志重放到当前时刻。"""
+        ...
 
 
 class WorldRepository(Protocol):

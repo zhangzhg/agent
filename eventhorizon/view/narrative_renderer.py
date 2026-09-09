@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from model.domain.events import GameEventDef
-    from model.domain.map import LocationCondition
+    from model.domain.map import LocationCondition, WorldView
     from model.services.turn_result import TurnResult
 
 _FORMATTER = string.Formatter()
@@ -82,10 +82,13 @@ def _is_ruined(location_condition: "LocationCondition | None") -> bool:
     return location_condition is not None and location_condition.value == "废墟"
 
 
-def placeholders_from(agent) -> dict:
-    """从 Agent 组装占位符白名单里约定的那几个字段（地点/境界/金钱/年龄/天气/对象）。"""
+def placeholders_from(agent, world: "WorldView | None" = None) -> dict:
+    """从 Agent（+ 可选的 WorldView）组装占位符白名单里约定的那几个字段（地点/
+    境界/金钱/年龄/天气/对象）。"{地点}" 取的是玩家看到的地点名（如"苍梧城·城门"），
+    不是内部 location_id（如"cangwu_gate"）——没传 world 时退化成 location_id，
+    只在极少数拿不到 WorldView 的调用点才会走到，正常渲染路径都应该传 world。"""
     return {
-        "地点": agent.location_id,
+        "地点": world.name_of(agent.location_id) if world is not None else agent.location_id,
         "境界": agent.realm,
         "金钱": agent.money,
         "年龄": agent.age,

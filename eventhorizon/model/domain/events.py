@@ -86,6 +86,13 @@ class GameEventDef:
     # 给人看的描述，不参与运行时判定——跟 predicate_text 不同，没有对应的"运行时
     # 用文字本身做判断"的机制。
 
+    narrative_embedding: tuple[float, ...] = ()
+    # 事件"在讲什么"的向量表示（tags+aliases+variants 文案拼接后录入时预计算），
+    # 用于 model/services/matching.py 的叙事贴切度重排——回答的是"这个事件此刻讲不
+    # 讲得通"，跟 predicate_embedding 回答的"触发条件是否成立"是两个不同的问题，
+    # 不共用同一份向量（见《向量化.md》"第二阶段：向量语义匹配"）。只做候选之间的
+    # 软加权，不做硬过滤——两边向量任一缺失就是中性乘子 1.0，不影响谁能不能触发。
+
     @property
     def needs_reply(self) -> bool:
         return bool(self.reply_options) or self.scenario_ref is not None

@@ -52,7 +52,14 @@ class ScheduleService:
         self._events = events
         self._rng = rng or random.Random()
         self._schedules = schedules or {}
-        self._executor = executor  # 通常绑定 PlayTurnService.execute_occurrence
+        self._executor = executor  # 通常绑定 PlayTurnService.trigger
+
+    def set_schedule(self, agent_id: str, schedule: Schedule) -> None:
+        """内容侧（NPC 录入/种子脚本）配置某个 Agent 的日程表，用法与
+        bootstrap.refresh_chat_parser 同一个道理：ScheduleService 在事件库/NPC 灌装
+        之前就已经建好，日程表要等 NPC 种子跑完才配得上号，所以留一个公开的设置口，
+        不用调用方直接伸手改 self._schedules。"""
+        self._schedules[agent_id] = schedule
 
     def maybe_trigger(self, agent: "Agent", now: "GameTime") -> None:
         if agent.state.name != "idle":

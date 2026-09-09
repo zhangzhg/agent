@@ -208,5 +208,12 @@ class Agent:
     pending_retreat_prompt: bool = False  # 已说"闭关"，等待"闭关多久"的回答（§4.3）
     consecutive_breakthrough_failures: int = 0  # 连续突破失败次数，达阈值触发走火入魔（§7.2）
 
+    # —— NPC 标记（README 1.5.2 日程系统用它筛选"谁该被日程巡检"）——
+    # 玩家 Agent 与 NPC Agent 共用同一个 Agent 结构、同一份快照存储（1.1 单主角
+    # 产品边界不代表存档里只能有一个 Agent：NPC 也要落库才能被查询/巡检）；
+    # is_npc 是区分"该不该被 ScheduleService 巡检"的唯一信号，不用 agent_id
+    # 命名约定去猜——猜的规则迟早会跟某个真实玩家 id 撞车。
+    is_npc: bool = False
+
     def as_eval_context(self, world: "WorldView | None" = None) -> EvalContext:
         return _AgentEvalContext(self, world)

@@ -35,7 +35,7 @@ def run_repl(agent_id: str = "player") -> None:
     app = build_app()
     seed_all(app)
     ensure_seed_agent(app, agent_id)
-    controller = ChatController(app.agent_repo, app.world_repo, app.play_turn, app.events)
+    controller = ChatController(app.agent_repo, app.world_repo, app.play_turn, app.events, rng=app.rng)
 
     print("《太一仙途》CLI（Ctrl+C 退出）")
     from content.onboarding import OPENING_NARRATIVE

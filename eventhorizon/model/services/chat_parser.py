@@ -1,8 +1,12 @@
 """model/services/chat_parser.py — 玩家脑洞文本解析（对应 README 1.11 /
 GAME_DESIGN §3.1）。
 
-MVP 是精确别名表（TODO #1：同义词多了会退化成"必须背咒语"，V2 上向量匹配前需要
-一版别名覆盖率统计）。只做映射，不调用大模型；失败返回 None。
+MVP 是精确别名表，只做映射，不调用大模型/向量；失败返回 None——TODO #1 提过的
+"同义词多了会退化成必须背咒语"，V2 向量匹配已经落地，但故意没放在这个类里：
+PlayTurnService.handle_player_text 在这里返回 None 之后，先试向量兜底
+（matching.py::find_best_matching_command），再试实时大模型创作
+（live_content_author.py），两者都是"这个类解析不了"之后的下一层，不属于
+"纯文本映射"这个模块的职责。
 
 `move`/`retreat_start`/`inspect_npc` 是"系统命令"（GAME_DESIGN §3.1 表格）：不是
 事件库里的 GameEventDef，直接由 ChatParser 内置识别，PlayTurnService / controller
@@ -21,17 +25,25 @@ if TYPE_CHECKING:
 MOVE_EVENT_ID = "move"
 RETREAT_START_EVENT_ID = "retreat_start"
 INSPECT_NPC_EVENT_ID = "inspect_npc"
+SCAN_EVENT_ID = "scan"
 
 # 只读查询命令：不改状态、不进 AgentEventHistory，controller 直接调只读服务，不走 PlayTurnService。
-QUERY_EVENT_IDS = frozenset({INSPECT_NPC_EVENT_ID})
+QUERY_EVENT_IDS = frozenset({INSPECT_NPC_EVENT_ID, SCAN_EVENT_ID})
 
 _MOVE_PREFIXES = ("去", "前往", "回")
 _MOVE_PATTERN = re.compile(r"^(?:去|前往|回)\s*(.+)$")
+# 句首版本覆盖不了"我想去{地点}"这类自然语言包裹——"去"/"前往"放宽成全文搜索
+# （取第一次出现之后到句尾的内容当目的地）；"回"故意不放宽：常见于否定句
+# （"我不想回去"之类），且"回{地点}"本来就是祈使句开头的固定用法，句首锚定
+# 收益已经够，放宽风险更大于收益。
+_MOVE_PATTERN_UNANCHORED = re.compile(r"(?:去|前往)\s*(.+)$")
 _RETREAT_ALIASES = ("闭关修炼", "闭关")
 _INSPECT_PATTERNS = (
     re.compile(r"^打听\s*(.+)$"),
     re.compile(r"^看看那(?:个|位)?人?[，,]?\s*(.*)$"),
 )
+# 神识扫描（GAME_DESIGN §5.3）：不消耗回合的只读探索命令，跟 inspect_npc 同一类。
+_SCAN_ALIASES = ("神识扫描", "用神识扫描", "扫描", "运转神识")
 _PRONOUN_WORDS = ("它", "这个", "那个", "这", "那")
 _DEFAULT_OBJECT_FILLABLE_EVENT_IDS = frozenset({"buy", "watch", "fight", "apprentice"})
 
@@ -87,6 +99,9 @@ class ChatParser:
                 target = m.group(1).strip() or None
                 return ParsedCommand(event_id=INSPECT_NPC_EVENT_ID, location_hint=None, target=target, args={}, is_query=True)
 
+        if any(alias in text for alias in _SCAN_ALIASES):
+            return ParsedCommand(event_id=SCAN_EVENT_ID, location_hint=None, target=None, args={}, is_query=True)
+
         if any(alias in text for alias in _RETREAT_ALIASES):
             return ParsedCommand(event_id=RETREAT_START_EVENT_ID, location_hint=None, target=None, args={})
 
@@ -97,7 +112,7 @@ class ChatParser:
         return None
 
     def _match_move(self, text: str) -> ParsedCommand | None:
-        m = _MOVE_PATTERN.match(text)
+        m = _MOVE_PATTERN.match(text) or _MOVE_PATTERN_UNANCHORED.search(text)
         if not m:
             return None
         destination = m.group(1).strip()

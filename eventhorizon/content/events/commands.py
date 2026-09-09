@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from model.domain.events import EventVariant, GameEventDef, ReplyOption
 from model.domain.predicates import Predicate, PredicateGroup, PredicateType
-from model.domain.results import Check, FlagClear, StateChange, WriteCause
+from model.domain.results import Check, FlagClear, FlagSet, StateChange, WriteCause
 from model.services.handlers.result_pool_executor import NEXT_REALM_SENTINEL
 
 EAT = GameEventDef(
@@ -126,7 +126,10 @@ APPRENTICE = GameEventDef(
     result_pool=(
         Check(
             kind="combat",  # 借用同一套 clamp 检定作为"考较资质"的通过率，不额外发明公式
-            on_success=(WriteCause(tag="师徒", target="藏剑山门", expires_years=None),),
+            # FlagSet 是 cangjian.py 四条门派事件（SECT_TRAINING/ELDER_INSIGHT/
+            # SECT_RIVALRY/MOUNTAIN_GATE_TEST）共同的 FLAG 谓词门槛——漏了这一条，
+            # 拜师成功后那四条事件永远进不了合格池，等于白拜。
+            on_success=(WriteCause(tag="师徒", target="藏剑山门", expires_years=None), FlagSet(name="有门派归属")),
             on_fail=(StateChange(field="heart_demon", delta=0.02),),
         ),
     ),

@@ -73,7 +73,11 @@ eventhorizon/
 │   │   ├── event_validation.py                       # 编辑器与 LlmEventAuthor 共用的校验（§4.12）
 │   │   ├── schedule_service.py                        # 日程：提高标签权重（§4.13）
 │   │   ├── death_service.py                            # 死亡结算与转世/夺舍/继承（§4.13）
-│   │   └── clock_service.py                             # 回合驱动时间推进 + 闭关批量结算（§4.11）
+│   │   ├── clock_service.py                             # 回合驱动时间推进 + 闭关批量结算（§4.11）
+│   │   ├── local_embedding.py                            # 本地兜底向量化（§11.2）
+│   │   ├── item_embedding_match.py                        # 录入时按语义匹配真实物品（§11.2）
+│   │   ├── live_narrative_writer.py                        # LlmEventWriter：对局侧补文案（§11.2）
+│   │   └── result_pool_safety.py                            # AI/自然语言产出的结果白名单过滤（§11.3）
 │   └── repositories/              # 数据访问与外部适配（§5）
 │       ├── sqlite_event_repository.py
 │       ├── event_log.py               # Event Sourcing 增量日志
@@ -81,18 +85,30 @@ eventhorizon/
 │       ├── embedding/
 │       │   ├── null_embedding.py         # MVP：向量模块关闭时的空实现
 │       │   └── sqlite_vector_index.py     # V2
-│       └── llm/
-│           └── llm_event_author.py          # 仅录入侧，对局侧不可达（1.3.4）
+│       └── llm/                            # 录入侧 AI 生成，一组 Adapter（§11.1）
+│           ├── llm_config.py                  # 连接配置：env > local.json > 仓库自带
+│           ├── openai_compatible_client.py     # 唯一的 LlmClient 实现，兼容 OpenAI 风格接口
+│           ├── llm_location_author.py           # 地点草稿
+│           ├── llm_item_author.py                # 物品草稿
+│           ├── llm_event_flavor_author.py         # 事件"风味"草稿（文案+简单结果）
+│           └── llm_result_text_parser.py           # 自然语言结果描述 → 结构化 Result
 ├── view/                           # 输出渲染（§6，新增）
 │   ├── narrative_renderer.py          # 叙述文本拼装：选中的 EventVariant + 占位符上下文 → 最终文案
 │   ├── state_diff_view.py              # 结构化状态差分的对外展现格式
 │   ├── calendar_view.py                 # 万年历界面展示数据组装（1.2.1 罗盘/干支历牌）
+│   ├── templating.py                     # Jinja2 模板环境配置（§11.4）
+│   ├── templates/                         # admin.html / chat.html 等页面模板
+│   ├── static/                             # theme.css 等两页共用静态资源
 │   └── schemas/                          # API 请求/响应 DTO
 │       ├── chat_schemas.py
-│       └── editor_schemas.py
+│       ├── editor_schemas.py
+│       ├── web_schemas.py                 # 聊天页 API 的请求/响应 DTO
+│       └── admin_schemas.py               # 管理后台 API 的请求/响应 DTO
 ├── controller/                     # 请求入口（§7，原 interface 层）
 │   ├── chat_controller.py             # 薄：parse 失败回文，否则 play_turn.handle_player_text
 │   ├── editor_controller.py
+│   ├── admin_controller.py               # 管理后台：/admin + /api/admin/*（§11.4）
+│   ├── web_controller.py                  # FastAPI 入口：聊天 API + 挂载管理后台
 │   └── cli_controller.py                # MVP 入口；ws_controller 放到 V1
 └── tests/
     ├── model/
@@ -1313,6 +1329,8 @@ controller 不调用 arbiter / pipeline / matching。编辑器 controller 只编
 | 用例 | `model/services/play_turn.py` | README 2.2 两段循环 |
 | 命令/差分（Command-Diff） | `model/domain/diff.py`：结果只产 diff，apply 是唯一写入点 | 1.8 Event Sourcing |
 | 薄入口 + 渲染 | `controller/*` / `view/*` | 本文档 |
+| 适配器（Adapter，多个） | `model/repositories/llm/*`：四个 LLM Author + `OpenAiCompatibleClient`，统一走 `LlmClient` Protocol | §11.1 |
+| Fail-open 兜底 | `local_embedding.embed_with_fallback`：真实 embedding 失败退到本地哈希词袋，不让向量功能整体失效 | §11.2 |
 
 ---
 
@@ -1347,7 +1365,48 @@ controller 不调用 arbiter / pipeline / matching。编辑器 controller 只编
 
 ---
 
-## 11. 实现期 TODO（已知未决，不阻塞开工）
+## 11. V1+ 已落地：录入侧 AI 生成、embedding 与 Web 管理后台
+
+本节记录的是实现过程中已经真实写完、跑通、有测试的部分，本文档之前的版本没跟上——只在 §5.3 提了一个概念性的 `LlmEventAuthor` 存根。实际落地的范围比那个存根大得多，按同样的分层原则拆成了好几个协作者，这里补齐，免得读者觉得代码"凭空多出一大块"。
+
+### 11.1 录入侧 AI 生成：一组 Adapter，不是一个大而全的类
+
+`model/repositories/llm/` 下没有做成一个万能的 `LlmEventAuthor`，而是按"生成什么"拆成四个各自独立的 Adapter，共用同一个底层客户端：
+
+| 类 | 生成什么 | 复用的安全/校验机制 |
+|---|---|---|
+| `LlmLocationAuthor` | 地点草稿（供地图编辑器批量起稿） | 产出仍是 `dict`，落库前照样过录入校验 |
+| `LlmItemAuthor` | 物品草稿 | 同上 |
+| `LlmEventFlavorAuthor` | 事件"风味"草稿（文案 + 简单数值结果） | `result_pool_safety.sanitize_result_pool`（§11.3）+ `event_validation.validate_event_def` |
+| `LlmResultTextParser` | 把编辑器里一段自然语言"结果"描述解析成结构化 `Result` | 同样过 `sanitize_result_pool` |
+
+四个类构造函数都只接受一个 `LlmClient` Protocol（`complete(prompt) -> str`），不知道也不关心背后是哪家模型——`model/repositories/llm/openai_compatible_client.py` 的 `OpenAiCompatibleClient` 是目前唯一实现，兼容 OpenAI 风格的 `/chat/completions` 与 `/embeddings` 接口（智谱 GLM 等国内厂商多数提供这一层兼容），`complete()`/`embed()` 复用同一个 HTTP 客户端实例、同一份鉴权配置。
+
+**配置与降级**：`model/repositories/llm/llm_config.py` 的 `load_llm_config()` 按 `EVENTHORIZON_LLM_CONFIG_PATH` 环境变量 → `llm_config.local.json`（`.gitignore` 排除，本地开发用）→ 仓库自带的 `eventhorizon/llm_config.json` 依次找配置；文件缺失或解析失败一律返回"未配置"的空配置，不抛异常——**AI 生成从设计上就是可选功能，配置缺失不能让 Web 服务起不来**。`bootstrap.build_app()` 的 `embedding`/`narrative_writer` 两个参数都允许 `None`，`web_controller.create_app()` 里只有 `llm_config.configured` 为真才真正实例化 `OpenAiCompatibleClient`。
+
+**对局隔离依然成立**：这四个 Adapter 只被 `controller/admin_controller.py` 持有，`model/services` 的对局路径（`play_turn.py`/`matching.py`/`chat_parser.py`）既不 import 它们，也不 import `LlmAuthorPort`——`tests/test_layering.py` 的架构守卫测试范围没有变，README 1.12"对局输出只抽已入库事件"的约束原样成立。
+
+### 11.2 向量能力：真实 embedding + 本地兜底，两条命都不缺
+
+`model/domain/events.py` 的 `GameEventDef` 新增了 `predicate_text`/`predicate_embedding` 字段——录入时除了白名单谓词，也允许写一段自然语言当"触发条件"的补充描述，编辑器保存时用 `embed_with_fallback()` 转成向量存下来，供 `matching.py` 的粗筛阶段做语义相似度判定（1.4.1 的"向量补规则盲区"落地）。
+
+`model/services/local_embedding.py` 是这条链路的关键设计：**embedding 服务不可用（没配置，或调用失败——网络问题、账户余额不足）不该让向量匹配整个失效**，`embed_with_fallback(client, text)` 优先尝试真实 `client.embed(text)`，失败就退到 `local_embed()`——一个不需要网络、纯本地的字符+字符二元组哈希词袋近似。两种向量刻意用不同维度（真实模型的 1024/1536/2048… vs 本地固定 128 维），`matching.py` 的 `cosine_similarity()` 见到维度不一致直接判 0，不会把"一个真向量、一个本地凑的向量"混着比出一个没有意义的相似度——**宁可判不匹配，不要判假匹配**。`model/services/item_embedding_match.py` 复用同一套向量与相似度函数，在录入时（不是触发时，物品库不大，解析结果提前算好写进 `ItemDrop`）把"结果文字里提到的东西"匹配到真实 `ItemDef`，两种向量各自标定了不同的相似度阈值（真实向量 0.8，本地向量 0.2——量纲不同，套同一个阈值等于其中一种永远匹配不上）。
+
+`model/services/live_narrative_writer.py` 是 README 1.12 表格里 `LlmEventWriter` 的实际实现：库内事件命中但 `variants` 留空时（编辑器没填文案，或 AI 生成的草稿本来就没带），现场补一句叙述并存回仓库（`PlayTurnService._ensure_variants`，见 §4.9），下次同一事件命中就不用再现场生成。**这个不属于"对局隔离"要挡的那个 `LlmAuthorPort`**——`LlmAuthorPort` 挡的是"录入侧生成新事件草稿"，`LlmEventWriter` 是 README 1.12 表格里本来就该在对局路径里用的第二条通道（合格池非空但文案缺失时的补文案，不是凭空造事件），两者是不同端口、不同职责，`play_turn.py` 顶部注释里专门解释了这个区分。
+
+### 11.3 `result_pool_safety.py`：AI/自然语言产出不直接信任
+
+`LlmEventFlavorAuthor`（批量生成事件）和 `LlmResultTextParser`（自然语言转结果）两条链路都会产出"结果"数据，`sanitize_result_pool()` 是它们共用的白名单过滤器：只放行 `state_change` 且 `field` 在安全字段表（`money`/`satiety`/`cultivation`/`heart_demon`）内的条目，`item_drop`/`chain_event`/`start_scenario` 这类需要引用真实 id 的结果类型直接过滤掉——AI 编出来的 id 十有八九悬空，与其指望 `validate_event_def()` 校验层兜底拒绝（浪费一次生成），不如在更早的这一步就不放行。这是 README 1.3.4"金钱/境界只许走结果类型"约束在 AI 生成场景下的具体落地方式。
+
+### 11.4 Web 管理后台：`controller/admin_controller.py` + `view/templates/`
+
+`controller/web_controller.py`（§7 提到的 FastAPI 入口）现在真的接了一个管理后台，不再是纯聊天 API：`register_admin_routes()` 挂载 `/admin` 页面与 `/api/admin/*` 一组接口，覆盖事件的增删查改、模拟触发沙盒（ARCHITECTURE §1.3.3 的"测试沙盒"）、以及 §11.1 那几个 AI 生成入口的表单。**分层约束没变**：`admin_controller.py` 是薄入口，事件校验/保存全部委派给 `model/services/event_validation.py`，跟 `editor_controller.py`（CLI/无头场景的同类入口）调用的是完全相同的函数，没有另写一份；地图/物品是直接读写 `app_ctx.world`/`app_ctx.items` 的录入型仓库，不经过 `apply_agent_diff`/`apply_world_diff`（那套 diff 机制是对局状态改动专用的，录入不是对局）。
+
+页面渲染换成了 Jinja2 模板（`view/templating.py` 配置模板目录、`view/templates/*.html`、`view/static/` 放共享的 `theme.css`），取代了之前内联在 Python 字符串里拼 HTML 的写法——`view` 层的职责没变（"怎么呈现"，不碰业务判断），只是呈现手段从字符串拼接换成了模板引擎。
+
+---
+
+## 12. 实现期 TODO（已知未决，不阻塞开工）
 
 | # | 事项 | 说明 |
 |---|------|------|

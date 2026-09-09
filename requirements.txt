@@ -5,3 +5,9 @@ fastapi>=0.100
 uvicorn>=0.22
 httpx>=0.24
 jinja2>=3.1
+# 本地向量化兜底：EmbeddingPort 的三层兜底链（GLM -> 本地模型 -> 字符哈希）里
+# 中间那一层，见 model/repositories/embedding/bge_local_embedding.py。首次调用
+# 会从 HuggingFace Hub 下载 BAAI/bge-small-zh-v1.5 权重到本地缓存，需要能访问
+# huggingface.co；此包不在配置的阿里云 pip 镜像上，装的时候要显式指定索引，例如：
+# pip install -r requirements.txt --extra-index-url https://pypi.org/simple/
+sentence-transformers>=3.0

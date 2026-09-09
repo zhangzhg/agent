@@ -35,7 +35,12 @@ class LlmClient(Protocol):
 def _build_prompt(description: str, count: int) -> str:
     description = description.strip()
     if description:
-        source_line = "情节描述：\n" + description + "\n\n"
+        source_line = (
+            "情节描述：\n" + description + "\n\n"
+            "如果这段描述本身不构成任何合理的游戏内场景（比如乱敲的字符、跟修仙"
+            "世界毫无关系的话、纯粹的测试文本），不要勉强编、也不要曲解成别的意思"
+            "——直接输出空数组 []。\n\n"
+        )
         inspiration_note = "2. variants 给 1-2 条不同措辞的文案，都要呼应上面的情节描述；\n"
     else:
         # 情节描述留空 = 让 AI 自己发挥：不能就地卡壳、也不能敷衍写"这里发生了一些

@@ -1,6 +1,12 @@
 import unittest
+from unittest.mock import patch
 
-from model.services.local_embedding import LOCAL_EMBEDDING_DIMS, embed_with_fallback, local_embed
+from model.services.local_embedding import (
+    LOCAL_EMBEDDING_DIMS,
+    FallbackEmbeddingClient,
+    embed_with_fallback,
+    local_embed,
+)
 
 
 class _FakeEmbeddingClient:
@@ -50,24 +56,62 @@ class LocalEmbedTests(unittest.TestCase):
 
 
 class EmbedWithFallbackTests(unittest.TestCase):
-    def test_none_client_falls_back_to_local(self):
-        result = embed_with_fallback(None, "一把锋利的长剑")
-        self.assertEqual(result, local_embed("一把锋利的长剑"))
-
-    def test_client_exception_falls_back_to_local(self):
-        client = _FakeEmbeddingClient(raises=True)
-        result = embed_with_fallback(client, "一把锋利的长剑")
-        self.assertEqual(result, local_embed("一把锋利的长剑"))
-
-    def test_client_empty_result_falls_back_to_local(self):
-        client = _FakeEmbeddingClient(vector=[])
-        result = embed_with_fallback(client, "一把锋利的长剑")
-        self.assertEqual(result, local_embed("一把锋利的长剑"))
+    """三层兜底链：client（一般是 GLM） -> 本地真实模型（bge） -> 字符哈希。
+    单测里用假的 bge 客户端替换掉真实模型加载（monkeypatch `_get_bge_client`），
+    不然每条用例都要真的跑一遍深度学习模型，既慢又依赖网络/本机缓存。"""
 
     def test_successful_client_result_is_used_verbatim(self):
         client = _FakeEmbeddingClient(vector=[0.1, 0.2, 0.3])
         result = embed_with_fallback(client, "一把锋利的长剑")
         self.assertEqual(result, (0.1, 0.2, 0.3))
+
+    def test_none_client_falls_back_to_bge_tier(self):
+        with patch("model.services.local_embedding._get_bge_client") as get_bge:
+            get_bge.return_value = _FakeEmbeddingClient(vector=[9.0, 9.0])
+            result = embed_with_fallback(None, "一把锋利的长剑")
+        self.assertEqual(result, (9.0, 9.0))
+
+    def test_client_exception_falls_back_to_bge_tier(self):
+        client = _FakeEmbeddingClient(raises=True)
+        with patch("model.services.local_embedding._get_bge_client") as get_bge:
+            get_bge.return_value = _FakeEmbeddingClient(vector=[9.0, 9.0])
+            result = embed_with_fallback(client, "一把锋利的长剑")
+        self.assertEqual(result, (9.0, 9.0))
+
+    def test_client_empty_result_falls_back_to_bge_tier(self):
+        client = _FakeEmbeddingClient(vector=[])
+        with patch("model.services.local_embedding._get_bge_client") as get_bge:
+            get_bge.return_value = _FakeEmbeddingClient(vector=[9.0, 9.0])
+            result = embed_with_fallback(client, "一把锋利的长剑")
+        self.assertEqual(result, (9.0, 9.0))
+
+    def test_bge_tier_exception_falls_back_to_local_hash(self):
+        """client 为 None、bge 本地模型也不可用（缺依赖/加载失败等环境问题）——
+        兜底的兜底，字符哈希，恒不失败。"""
+        with patch("model.services.local_embedding._get_bge_client") as get_bge:
+            get_bge.return_value = _FakeEmbeddingClient(raises=True)
+            result = embed_with_fallback(None, "一把锋利的长剑")
+        self.assertEqual(result, local_embed("一把锋利的长剑"))
+
+    def test_bge_tier_empty_result_falls_back_to_local_hash(self):
+        with patch("model.services.local_embedding._get_bge_client") as get_bge:
+            get_bge.return_value = _FakeEmbeddingClient(vector=[])
+            result = embed_with_fallback(None, "一把锋利的长剑")
+        self.assertEqual(result, local_embed("一把锋利的长剑"))
+
+
+class FallbackEmbeddingClientTests(unittest.TestCase):
+    """生产环境的统一入口——包装三层兜底链，本身实现 EmbeddingPort，永远不是 None。"""
+
+    def test_delegates_to_embed_with_fallback(self):
+        client = FallbackEmbeddingClient(_FakeEmbeddingClient(vector=[1.0, 2.0]))
+        self.assertEqual(client.embed("测试文本"), [1.0, 2.0])
+
+    def test_none_primary_still_returns_a_usable_vector(self):
+        client = FallbackEmbeddingClient(None)
+        with patch("model.services.local_embedding._get_bge_client") as get_bge:
+            get_bge.return_value = _FakeEmbeddingClient(vector=[3.0, 4.0])
+            self.assertEqual(client.embed("测试文本"), [3.0, 4.0])
 
 
 if __name__ == "__main__":

@@ -7,8 +7,11 @@ from model.domain.predicates import Predicate, PredicateGroup, PredicateType
 from model.services.matching import (
     MatchContext,
     build_context_embedding,
+    build_narrative_context_text,
     coarse_filter,
     cosine_similarity,
+    find_best_matching_command,
+    narrative_fit_multiplier,
     pick_variant,
     reweight_and_pick,
 )
@@ -243,7 +246,7 @@ class BuildContextEmbeddingTests(unittest.TestCase):
         self.assertEqual(result, (1.0, 2.0, 3.0))
 
     def test_embedding_failure_returns_empty_tuple_not_raises(self):
-        """活跃对局路径里唯一一处会打外部网络的地方——网络挂了/超时绝不能崩掉
+        """活跃对局路径里会打外部网络/跑本地模型的少数几处之一——失败绝不能崩掉
         整个回合，得退化成空向量（fail-open）。"""
         class FailingEmbedding:
             def embed(self, text):
@@ -251,6 +254,113 @@ class BuildContextEmbeddingTests(unittest.TestCase):
 
         result = build_context_embedding(FailingEmbedding(), location_type="酒楼", realm="凡人", money=10, age=20)
         self.assertEqual(result, ())
+
+
+class BuildNarrativeContextTextTests(unittest.TestCase):
+    """《向量化.md》"构建上下文查询文本"：给叙事重排用的自然语言描述，跟
+    build_context_embedding() 极简的结构化字符串是两种不同风格的文本。"""
+
+    def test_produces_natural_language_sentence_with_key_fields(self):
+        text = build_narrative_context_text(
+            location="苍梧城", location_type="主街", realm="筑基期", money=10, age=20, time_shichen=6,
+        )
+        for fragment in ("筑基期", "主街", "苍梧城", "20", "6"):
+            self.assertIn(fragment, text)
+
+    def test_no_flags_omits_status_clause(self):
+        text = build_narrative_context_text(
+            location="苍梧城", location_type="主街", realm="筑基期", money=10, age=20, time_shichen=6,
+        )
+        self.assertNotIn("状态", text)
+
+    def test_flags_appended_when_present(self):
+        text = build_narrative_context_text(
+            location="苍梧城", location_type="主街", realm="筑基期", money=10, age=20, time_shichen=6,
+            flags={"重伤"},
+        )
+        self.assertIn("重伤", text)
+
+
+class NarrativeFitMultiplierTests(unittest.TestCase):
+    """事件叙事贴切度重排：只做软加权（[0.5, 1.5]），不做硬过滤——两边向量任一
+    缺失就是中性乘子 1.0，跟 predicate_text 那种硬门槛判定是两个不同的机制。"""
+
+    def _mctx_with_narrative(self, embedding):
+        now = make_time()
+        return MatchContext(
+            location="jiuguan", location_type="酒楼", time_shichen=now.shichen, now=now,
+            age=20, realm="凡人", money=10, causes=[], narrative_context_embedding=embedding,
+        )
+
+    def test_missing_event_narrative_embedding_is_neutral(self):
+        mctx = self._mctx_with_narrative((1.0, 0.0))
+        event = _def("e1", narrative_embedding=())
+        self.assertEqual(narrative_fit_multiplier(event, mctx), 1.0)
+
+    def test_missing_context_narrative_embedding_is_neutral(self):
+        mctx = self._mctx_with_narrative(())
+        event = _def("e1", narrative_embedding=(1.0, 0.0))
+        self.assertEqual(narrative_fit_multiplier(event, mctx), 1.0)
+
+    def test_high_similarity_boosts_weight_above_one(self):
+        mctx = self._mctx_with_narrative((1.0, 0.0))
+        event = _def("e1", narrative_embedding=(1.0, 0.0))
+        self.assertEqual(narrative_fit_multiplier(event, mctx), 1.5)
+
+    def test_low_similarity_reduces_weight_below_one(self):
+        mctx = self._mctx_with_narrative((1.0, 0.0))
+        event = _def("e1", narrative_embedding=(-1.0, 0.0))
+        self.assertEqual(narrative_fit_multiplier(event, mctx), 0.5)
+
+    def test_orthogonal_similarity_stays_neutral(self):
+        mctx = self._mctx_with_narrative((1.0, 0.0))
+        event = _def("e1", narrative_embedding=(0.0, 1.0))
+        self.assertEqual(narrative_fit_multiplier(event, mctx), 1.0)
+
+    def test_never_produces_a_zero_or_negative_multiplier(self):
+        """乘子恒为正——不会因为叙事贴切度把候选的最终权重砸成 0 或负数（那样会
+        让 reweight_and_pick 的加权采样出错，见其自身"总权重非正就退化成抽空"的
+        防御性兜底）。"""
+        mctx = self._mctx_with_narrative((1.0, 0.0))
+        event = _def("e1", narrative_embedding=(-1.0, 0.0))
+        self.assertGreater(narrative_fit_multiplier(event, mctx), 0.0)
+
+
+class FindBestMatchingCommandTests(unittest.TestCase):
+    """chat_parser.py 别名匹配失败后的向量意图兜底——"吃点东西"这类自然语言，
+    跟命令型事件的 narrative_embedding 比语义相似度找最像的一个。"""
+
+    def test_finds_closest_match_above_threshold(self):
+        candidates = [
+            _def("eat", narrative_embedding=(1.0, 0.0)),
+            _def("meditate", narrative_embedding=(0.0, 1.0)),
+        ]
+        result = find_best_matching_command(candidates, query_embedding=(1.0, 0.0), threshold=0.5)
+        self.assertEqual(result.event_id, "eat")
+
+    def test_no_match_above_threshold_returns_none(self):
+        candidates = [_def("eat", narrative_embedding=(1.0, 0.0))]
+        result = find_best_matching_command(candidates, query_embedding=(0.0, 1.0), threshold=0.5)
+        self.assertIsNone(result)
+
+    def test_empty_query_embedding_returns_none(self):
+        candidates = [_def("eat", narrative_embedding=(1.0, 0.0))]
+        self.assertIsNone(find_best_matching_command(candidates, query_embedding=(), threshold=0.5))
+
+    def test_candidates_without_narrative_embedding_are_skipped(self):
+        candidates = [_def("eat", narrative_embedding=())]
+        self.assertIsNone(find_best_matching_command(candidates, query_embedding=(1.0, 0.0), threshold=0.5))
+
+    def test_empty_candidate_list_returns_none(self):
+        self.assertIsNone(find_best_matching_command([], query_embedding=(1.0, 0.0), threshold=0.5))
+
+    def test_picks_the_single_best_match_not_just_first_above_threshold(self):
+        candidates = [
+            _def("close_enough", narrative_embedding=(0.9, 0.1)),
+            _def("best_match", narrative_embedding=(1.0, 0.0)),
+        ]
+        result = find_best_matching_command(candidates, query_embedding=(1.0, 0.0), threshold=0.5)
+        self.assertEqual(result.event_id, "best_match")
 
 
 if __name__ == "__main__":

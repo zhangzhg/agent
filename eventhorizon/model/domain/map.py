@@ -124,8 +124,16 @@ class WorldView:
             if loc.location_id == hint or loc.name == hint or loc.location_type == hint:
                 return loc
         for loc in visible:
-            if hint in loc.name or loc.name in hint or hint in loc.location_type or loc.location_type in hint:
+            if hint in loc.name or loc.name in hint or hint in loc.location_type:
                 return loc
+        # loc.location_type in hint（"去逛逛集市"这种类型名被自然语言包住的情况）
+        # 单独放最后一档，且要求全图只有一个该类型的地点才生效——"城市"这种
+        # 通配类型标签往往对应不止一个地点（苍梧城、落雁镇都是"城市"），"我想去
+        # 其他城市"这种话如果命中，会把"其他"这个明确的排除意图悄悄吞掉、静默
+        # 传送到列表里第一个同类型地点，比直接说"找不到"更糟。
+        type_matches = [loc for loc in visible if loc.location_type in hint]
+        if len(type_matches) == 1:
+            return type_matches[0]
         return None
 
     def hidden_candidates_at(self, parent_location_id: str) -> list[Location]:

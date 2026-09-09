@@ -140,4 +140,118 @@ MARKET_BARGAIN = GameEventDef(
     is_draft=False,
 )
 
-ALL = (GOLDEN_FISH, GOLDEN_FISH_REVEAL, STREET_VENDOR, TAVERN_GOSSIP, PICKPOCKET, MARKET_BARGAIN)
+TEAHOUSE_DEBATE = GameEventDef(
+    event_id="teahouse_debate",
+    applicable_locations=("酒楼",),
+    applicable_time=None,
+    predicate=None,
+    weight=1.5,
+    duration_shichen=0,
+    cooldown_shichen=36,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交",),
+    aliases=(),
+    result_pool=(StateChange(field="scene_focus", set_to="辩论的客人"),),
+    variants=(
+        EventVariant("邻桌两位散修为了一句功法要义争得面红耳赤。"),
+        EventVariant("有人拍案而起，说对方的修炼法门根本是歪门邪道。"),
+        EventVariant("几位食客围着一张桌子，正为谁的境界更高争论不休。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+CHILDHOOD_FRIEND = GameEventDef(
+    event_id="childhood_friend",
+    applicable_locations=("主街",),
+    applicable_time=None,
+    predicate=None,
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=200,
+    max_trigger_per_agent=1,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交", "奇遇"),
+    aliases=(),
+    result_pool=(WriteCause(tag="知己", target="儿时旧友", expires_years=None),),
+    variants=(
+        EventVariant("一张熟悉的脸从人群里冒出来——是许久未见的儿时旧友，两人相视大笑。"),
+        EventVariant("有人从背后拍你的肩膀，一回头竟是失散多年的旧相识。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+BEGGAR_KINDNESS = GameEventDef(
+    event_id="beggar_kindness",
+    applicable_locations=("主街", "集市"),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.MONEY_GTE, (3,)),)),
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=72,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("社交",),
+    aliases=(),
+    result_pool=(StateChange(field="money", delta=-3), WriteCause(tag="恩情", target="街边乞儿", expires_years=15)),
+    variants=(
+        EventVariant("街角一个衣衫褴褛的孩子冲你伸出手，你随手给了些铜钱。"),
+        EventVariant("一位老乞丐向你行了个礼，念叨着「善有善报」。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+LANTERN_NIGHT = GameEventDef(
+    event_id="lantern_night",
+    applicable_locations=("主街",),
+    applicable_time=None,
+    predicate=None,
+    weight=1.0,
+    duration_shichen=0,
+    cooldown_shichen=48,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("环境", "生活"),
+    aliases=(),
+    result_pool=(StateChange(field="heart_demon", delta=-0.01),),
+    variants=(
+        EventVariant("满街灯笼次第亮起，映得青石板路暖融融的。"),
+        EventVariant("孩童追逐着灯笼跑过，笑声在巷子里回荡。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+NEW_STALL_OWNER = GameEventDef(
+    event_id="new_stall_owner",
+    applicable_locations=("集市",),
+    applicable_time=None,
+    predicate=PredicateGroup("AND", (Predicate(PredicateType.MONEY_GTE, (3,)),)),
+    weight=1.5,
+    duration_shichen=0,
+    cooldown_shichen=48,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("生活",),
+    aliases=(),
+    result_pool=(StateChange(field="money", delta=-3), ItemDrop(item_id="cloth_pouch", n=1)),
+    variants=(
+        EventVariant("新开张的小摊贩热情招呼，你随手买了个小玩意儿。"),
+        EventVariant("摊主是个生面孔，吆喝声格外卖力，你凑趣买了点东西。"),
+    ),
+    is_command=False,
+    is_draft=False,
+)
+
+ALL = (
+    GOLDEN_FISH, GOLDEN_FISH_REVEAL, STREET_VENDOR, TAVERN_GOSSIP, PICKPOCKET, MARKET_BARGAIN,
+    TEAHOUSE_DEBATE, CHILDHOOD_FRIEND, BEGGAR_KINDNESS, LANTERN_NIGHT, NEW_STALL_OWNER,
+)

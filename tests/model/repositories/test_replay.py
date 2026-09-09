@@ -15,7 +15,10 @@ class ReplayTests(unittest.TestCase):
         self.conn = sqlite3.connect(":memory:")
         self.snapshots = SqliteSnapshotStore(self.conn)
         self.log = SqliteEventLogStore(self.conn)
-        self.repo = SqliteAgentRepository(self.snapshots, self.log)
+        # now_provider 必须来自全局时钟而非某个 Agent 自己的 time_anchor（见
+        # agent_repository.py 的说明）；这里所有测试用的 Agent 都是刚 make_agent()
+        # 出来、锚点未被推进过的，值恰好等于 make_time()，跟旧行为一致。
+        self.repo = SqliteAgentRepository(self.snapshots, self.log, now_provider=make_time)
 
     def test_load_after_snapshot_reproduces_saved_state(self):
         agent = make_agent(money=10, satiety=50)

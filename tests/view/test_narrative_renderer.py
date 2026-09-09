@@ -1,8 +1,10 @@
 import unittest
 
 from model.domain.events import EventVariant, GameEventDef
+from model.domain.map import Location, LocationKind, WorldState, WorldView
 from model.services.turn_result import TurnResult
-from view.narrative_renderer import render_turn, safe_format
+from tests.helpers import make_agent
+from view.narrative_renderer import placeholders_from, render_turn, safe_format
 
 
 def _def(event_id, text):
@@ -54,6 +56,23 @@ class RenderTurnTests(unittest.TestCase):
 
     def test_no_parts_falls_back_to_default_text(self):
         self.assertEqual(render_turn(TurnResult(), {}, {}), "无事发生。")
+
+
+class PlaceholdersFromTests(unittest.TestCase):
+    """"{地点}"占位符要解析成玩家看到的地点名，不是内部 location_id——"你来到了
+    cangwu_gate。"这种内部 id 泄漏进叙述文本，跟"你来到了苍梧城·城门。"比起来
+    明显不对劲。"""
+
+    def test_location_resolves_to_display_name_when_world_given(self):
+        agent = make_agent(location_id="cangwu_gate")
+        world = WorldView(_state=WorldState(locations={
+            "cangwu_gate": Location("cangwu_gate", "苍梧城·城门", LocationKind.CITY, "城门"),
+        }))
+        self.assertEqual(placeholders_from(agent, world)["地点"], "苍梧城·城门")
+
+    def test_falls_back_to_location_id_without_world(self):
+        agent = make_agent(location_id="cangwu_gate")
+        self.assertEqual(placeholders_from(agent)["地点"], "cangwu_gate")
 
 
 if __name__ == "__main__":

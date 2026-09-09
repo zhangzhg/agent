@@ -243,6 +243,17 @@ def register_admin_routes(
                 raw["predicate_embedding"] = []
         else:
             raw["predicate_embedding"] = []
+        # tags+aliases+variants -> narrative_embedding：事件"在讲什么"的向量，跟
+        # predicate_text 判的"条件是否成立"是两回事，不共用同一份向量（见
+        # 《向量化.md》"第二阶段：向量语义匹配"）。只用于对局里的软加权重排，不是
+        # 硬门槛，所以直接走三层兜底链，不用像 predicate_text 那样区分"没配置
+        # embedding"——反正拿不到向量时 matching.py 那边会自然按中性乘子处理。
+        narrative_text = " ".join(
+            list(raw.get("tags") or [])
+            + list(raw.get("aliases") or [])
+            + [str(v.get("text", "")) for v in (raw.get("variants") or [])]
+        ).strip()
+        raw["narrative_embedding"] = list(embed_with_fallback(embedding, narrative_text)) if narrative_text else []
         # result_text -> result_pool：只有真的填了文字描述才尝试解析、并整体替换
         # result_pool；留空就是前端传回来的原样（旧数据或空列表），不去动它。
         result_text = str(raw.get("result_text") or "").strip()
@@ -290,6 +301,10 @@ def register_admin_routes(
             item_result = _resolve_item_query(flavor.get("item_query", ""), app_ctx, embedding)
             if item_result is not None:
                 result_pool.append(item_result)
+            tags = flavor.get("tags", [])
+            aliases = flavor.get("aliases", [])
+            variants = flavor.get("variants", [])
+            narrative_text = " ".join(list(tags) + list(aliases) + list(variants)).strip()
             raw = {
                 "event_id": "ai_" + uuid.uuid4().hex[:10],
                 "applicable_locations": req.applicable_locations or ["*"],
@@ -298,12 +313,13 @@ def register_admin_routes(
                 "duration_shichen": flavor.get("duration_shichen", 1),
                 "cooldown_shichen": flavor.get("cooldown_shichen", 0),
                 "priority": flavor.get("priority", 5),
-                "tags": flavor.get("tags", []),
-                "aliases": flavor.get("aliases", []),
+                "tags": tags,
+                "aliases": aliases,
                 "result_pool": result_pool,
-                "variants": [{"text": text, "weight": 1.0} for text in flavor.get("variants", [])],
+                "variants": [{"text": text, "weight": 1.0} for text in variants],
                 "is_draft": True,
-                "is_command": bool(flavor.get("aliases")),
+                "is_command": bool(aliases),
+                "narrative_embedding": list(embed_with_fallback(embedding, narrative_text)) if narrative_text else [],
             }
             defn, errors = validate_event_def(raw, catalog)
             if defn is not None:
@@ -441,4 +457,5 @@ def _event_to_dto(defn: GameEventDef) -> EventDetailDTO:
         predicate_text=defn.predicate_text,
         predicate_embedding=list(defn.predicate_embedding),
         result_text=defn.result_text,
+        narrative_embedding=list(defn.narrative_embedding),
     )

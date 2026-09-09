@@ -148,6 +148,8 @@ def validate_event_def(raw: dict, ctx: ValidationCatalog) -> tuple[GameEventDef 
         # 是纯结构校验，不做任何 I/O，向量化需要真的调 EmbeddingPort。
         predicate_embedding=tuple(raw.get("predicate_embedding") or ()),
         result_text=str(raw.get("result_text") or ""),
+        # narrative_embedding 同样由调用方算好传进来，理由同 predicate_embedding。
+        narrative_embedding=tuple(raw.get("narrative_embedding") or ()),
     )
     return defn, []
 

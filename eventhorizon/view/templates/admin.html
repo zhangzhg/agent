@@ -133,6 +133,11 @@
      或自动换行更整齐，也不会因为列宽变化忽宽忽窄。 */
   .event-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
   .event-actions .btn { margin: 0; }
+  /* 事件页表单列：字段一多，滚到最下面才能点保存/发布体验很差——.col 本来就是
+     flex column（见上面 #pane-events.active > .cols > .col 那条通用规则），这里
+     把字段区域（.scroll-panel）和操作按钮拆成两个子块，按钮块 flex-shrink:0
+     固定在列底部，不随字段一起滚，随时可见。 */
+  #pane-events .actions-footer { flex-shrink: 0; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 8px; }
   @media (max-width: 720px) {
     /* 窄屏堆叠成单列：两块各自的内部滚动条体验很差（手指划一下不知道滚的是哪
        块），改回让外层文档本身滚动。 */
@@ -346,7 +351,8 @@
       <input type="text" id="event-search" placeholder="搜索 event_id / 标签…" oninput="renderEventList()" />
       <div class="scroll-list"><table><tbody id="event-list"></tbody></table></div>
     </div>
-    <div class="col scroll-panel">
+    <div class="col">
+      <div class="scroll-panel">
       <fieldset>
         <legend>AI 生成事件（可参考小说情节）</legend>
         <label>情节描述 / 灵感来源（留空则由 AI 自由发挥）</label>
@@ -401,15 +407,17 @@
 
       <div class="hint" id="ev-variants-hint" style="display:none">此事件已有文案变体（AI 生成或旧版数据），保留不动；这里不提供编辑，触发时若为空会由 LLM 现场补一句叙事并存回。</div>
       <div class="hint" id="ev-reply-hint" style="display:none">此事件已有局部选项（needs_reply，旧版数据），保留不动，这里不提供编辑。</div>
-
-      <div class="event-actions">
-        <button class="btn" onclick="saveEvent()">保存草稿</button>
-        <button class="btn" onclick="publishEvent()">发布</button>
-        <button class="btn secondary" onclick="unpublishEvent()">撤回为草稿</button>
-        <button class="btn danger" onclick="deleteEvent()">删除</button>
       </div>
-      <div class="errors" id="ev-errors"></div>
-      <div class="ok-msg" id="ev-ok"></div>
+      <div class="actions-footer">
+        <div class="event-actions">
+          <button class="btn" onclick="saveEvent()">保存草稿</button>
+          <button class="btn" onclick="publishEvent()">发布</button>
+          <button class="btn secondary" onclick="unpublishEvent()">撤回为草稿</button>
+          <button class="btn danger" onclick="deleteEvent()">删除</button>
+        </div>
+        <div class="errors" id="ev-errors"></div>
+        <div class="ok-msg" id="ev-ok"></div>
+      </div>
     </div>
   </div>
 </div>

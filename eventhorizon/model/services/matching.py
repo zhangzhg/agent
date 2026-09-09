@@ -28,22 +28,85 @@ if TYPE_CHECKING:
 PREDICATE_SIMILARITY_THRESHOLD = 0.75
 
 
+def embed_safely(embedding: "EmbeddingPort | None", text: str) -> tuple[float, ...]:
+    """embedding 为 None（向量模块关闭）或调用失败（网络/超时——对局路径里少数
+    几处会打外部网络/跑本地模型的地方之一，绝不能让它崩掉整个回合）都返回空元组
+    而不是抛异常，调用方（coarse_filter 的 predicate_text 分支、
+    narrative_fit_multiplier）见到空向量各自按 fail-open/中性值处理。"""
+    if embedding is None:
+        return ()
+    try:
+        return tuple(embedding.embed(text))
+    except Exception:
+        return ()
+
+
 def build_context_embedding(
     embedding: "EmbeddingPort | None", *, location_type: str, realm: str, money: int, age: int
 ) -> tuple[float, ...]:
     """给 MatchContext.context_embedding 用：把当前情境的结构化字段拼成一句简短
     文本再编码（README 1.4.1："状态上下文优先读结构化字段…避免每次把整段状态拼
-    进去再 embedding"，这里就是那个"结构化字段"版本，不是把叙事原文整段丢进去）。
-    embedding 为 None（向量模块关闭）或调用失败（网络/超时——这是活跃对局路径里
-    唯一一处会打外部网络的地方，绝不能让它崩掉整个回合）都返回空元组，
-    coarse_filter 见到空的 context_embedding 会 fail-open。"""
-    if embedding is None:
-        return ()
+    进去再 embedding"，这里就是那个"结构化字段"版本，不是把叙事原文整段丢进去）。"""
     text = f"地点类型:{location_type} 境界:{realm} 金钱:{money} 年龄:{age}"
-    try:
-        return tuple(embedding.embed(text))
-    except Exception:
-        return ()
+    return embed_safely(embedding, text)
+
+
+def build_narrative_context_text(
+    *, location: str, location_type: str, realm: str, money: int, age: int, time_shichen: int, flags: "set[str] | None" = None
+) -> str:
+    """给叙事贴切度重排用的自然语言描述（《向量化.md》"构建上下文查询文本"：
+    "不要直接把数据库字段丢给 Embedding 模型，而要编写一段具有修仙风味的自然语言
+    描述"）——跟 build_context_embedding() 极简的结构化字符串是两回事，服务的目的
+    也不同：那个用于"触发条件是否成立"的精确判定，这个用于"这个事件此刻讲不讲得
+    通"的模糊贴切度打分，文本风格本该不一样。"""
+    text = f"一位境界为{realm}的修士身处{location_type}{location}，随身带着{money}两银子，年方{age}岁，此刻是{time_shichen}时辰。"
+    if flags:
+        text += f"当前状态：{'、'.join(sorted(flags))}。"
+    return text
+
+
+def narrative_fit_multiplier(event_def: "GameEventDef", ctx: MatchContext) -> float:
+    """《向量化.md》"第二阶段：向量语义匹配"——候选事件跟玩家此刻处境的语义贴切度，
+    折算成 reweight_and_pick 的一个温和乘子（[0.5, 1.5]），只做软加权，不做硬
+    过滤：贴切的候选被抽中概率略高，不贴切的略低，但谁都不会因为这个乘子被直接
+    排除出候选池——跟 predicate_text 那种硬门槛判定是两个不同的机制。两边向量
+    任一缺失（事件没有 narrative_embedding，或本回合没算 narrative_context_embedding）
+    都返回中性值 1.0，不影响现有行为（fail-open，跟其它向量功能一致）。"""
+    if not event_def.narrative_embedding or not ctx.narrative_context_embedding:
+        return 1.0
+    similarity = cosine_similarity(event_def.narrative_embedding, ctx.narrative_context_embedding)
+    return 1.0 + max(-0.5, min(0.5, similarity))
+
+
+# 命令意图向量兜底的相似度阈值——用真实 BGE 向量实测标定过（见开发时的现场
+# 校准）：真正命中的自然语言改写（"我想吃饭"/"打坐修炼一下"/"找人切磋一下"）
+# 落在 0.57~0.70，明显无关的话（"我想去其他城市"/"随便聊聊天气"/"你好啊"）
+# 最高只到 0.47，中间有清晰的空档，0.55 落在空档中间，两边都留了余量。
+COMMAND_INTENT_SIMILARITY_THRESHOLD = 0.55
+
+
+def find_best_matching_command(
+    candidates: list["GameEventDef"], query_embedding: tuple[float, ...], threshold: float = COMMAND_INTENT_SIMILARITY_THRESHOLD
+) -> "GameEventDef | None":
+    """chat_parser.py 的别名精确/子串匹配失败后的向量兜底（chat_parser.py 自己的
+    模块文档里"V2 上向量匹配"那条既定路线图）：玩家打自然语言（"吃点东西"）时，
+    跟当前地点已发布命令型事件的 narrative_embedding（tags+aliases+variants 拼接
+    后的向量，录入时已经算好，见 admin_controller.py::save_event）比语义相似度，
+    挑最像的一个当作命中——跟 item_embedding_match.py::find_best_matching_item
+    是同一形状：候选或查询向量缺失都返回 None（fail-closed，宁可"听不懂"也不要
+    误执行一个玩家没打算做的命令）。"""
+    if not query_embedding:
+        return None
+    best: "GameEventDef | None" = None
+    best_score = threshold
+    for candidate in candidates:
+        if not candidate.narrative_embedding:
+            continue
+        score = cosine_similarity(query_embedding, candidate.narrative_embedding)
+        if score >= best_score:
+            best = candidate
+            best_score = score
+    return best
 
 
 @dataclass
@@ -61,6 +124,10 @@ class MatchContext:
     # 算一次、传进来复用，不在这里每个候选事件各编码一次——README 1.4.1："状态上下文
     # 优先读结构化字段…避免每次把整段状态拼进去再 embedding"。留空 = 向量模块关闭
     # 或者本回合没算（fail-open，predicate_text 分支视为无条件，见 coarse_filter）。
+    narrative_context_embedding: tuple[float, ...] = field(default_factory=tuple)
+    # build_narrative_context_text() 编码后的向量，同样一回合算一次、传进来复用；
+    # 只喂给 narrative_fit_multiplier() 做软加权重排，不参与 coarse_filter 的硬
+    # 过滤，跟上面 context_embedding（喂给 predicate_text 硬门槛判定）用途不同。
 
 
 def cosine_similarity(a: tuple[float, ...], b: tuple[float, ...]) -> float:

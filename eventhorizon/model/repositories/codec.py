@@ -152,6 +152,7 @@ def event_def_to_dict(e: GameEventDef) -> dict:
         "predicate_text": e.predicate_text,
         "predicate_embedding": list(e.predicate_embedding),
         "result_text": e.result_text,
+        "narrative_embedding": list(e.narrative_embedding),
     }
 
 
@@ -188,6 +189,7 @@ def event_def_from_dict(d: dict) -> GameEventDef:
         predicate_text=d.get("predicate_text", ""),
         predicate_embedding=tuple(d.get("predicate_embedding") or ()),
         result_text=d.get("result_text", ""),
+        narrative_embedding=tuple(d.get("narrative_embedding") or ()),
     )
 
 
@@ -369,6 +371,7 @@ def agent_to_dict(agent: Agent) -> dict:
         "turn_count": agent.turn_count,
         "pending_retreat_prompt": agent.pending_retreat_prompt,
         "consecutive_breakthrough_failures": agent.consecutive_breakthrough_failures,
+        "is_npc": agent.is_npc,
     }
 
 
@@ -419,6 +422,7 @@ def agent_from_dict(d: dict) -> Agent:
         turn_count=d.get("turn_count", 0),
         pending_retreat_prompt=d.get("pending_retreat_prompt", False),
         consecutive_breakthrough_failures=d.get("consecutive_breakthrough_failures", 0),
+        is_npc=d.get("is_npc", False),
     )
 
 

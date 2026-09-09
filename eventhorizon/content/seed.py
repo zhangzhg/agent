@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 from content import map as content_map
 from content.events import cangjian, cangwu, commands, guixu, heifeng, luoyan, universal
 from content.items import ALL as ALL_ITEMS
+from content.npc import seed_npcs
 
 if TYPE_CHECKING:
     from bootstrap import AppContext
@@ -32,12 +33,15 @@ def seed_items(app: "AppContext") -> None:
 
 
 def seed_all(app: "AppContext") -> None:
-    """一次性把地图/事件/物品都灌进去，并刷新 ChatParser 的别名表（build_app() 建
-    app 时事件库还是空的，ChatParser 那时候建不出正确的别名表）。"""
+    """一次性把地图/事件/物品/NPC 都灌进去，并刷新 ChatParser 的别名表
+    （build_app() 建 app 时事件库还是空的，ChatParser 那时候建不出正确的别名表）。
+    NPC 必须排在事件/地图之后种：seed_npcs() 里生成的 Agent 引用了 content.map 的
+    地点 id，日程标签命中与否也取决于事件库是否已经灌好。"""
     from bootstrap import refresh_chat_parser
 
     seed_world(app)
     seed_events(app)
     seed_items(app)
+    seed_npcs(app)
     refresh_chat_parser(app)
     app.world_repo.save(app.clock.now())

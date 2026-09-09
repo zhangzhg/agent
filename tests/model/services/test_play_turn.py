@@ -8,6 +8,7 @@ from model.domain.states import ActingState, ClosedDoorState, DeadState, Encount
 from model.repositories.event_log import InMemoryEventLogStore
 from model.repositories.sqlite_event_repository import InMemoryEventRepository
 from model.services.arbiter import ArbitrationDecision
+from model.services.play_turn import _looks_like_gibberish
 from tests.helpers import make_agent, make_play_turn, make_tavern_world, make_time
 
 
@@ -266,6 +267,195 @@ class LiveVariantSupplementationTests(unittest.TestCase):
 
         self.assertEqual(writer.calls, 0)
         self.assertEqual(events.get_by_id("eat").variants[0].text, "你吃了饭。")
+
+
+class _FixedEmbeddingPort:
+    def __init__(self, vector):
+        self._vector = vector
+
+    def embed(self, text):
+        return list(self._vector)
+
+
+class _FakeLiveClient:
+    """LiveContentAuthor 用的假 LlmClient——固定返回一段 JSON 文本，不管 prompt
+    具体是什么（这些测试关心的是接线是否正确，不是 prompt 内容）。"""
+
+    def __init__(self, response: str):
+        self.response = response
+        self.calls = 0
+
+    def complete(self, prompt):
+        self.calls += 1
+        return self.response
+
+
+class CommandIntentFallbackTests(unittest.TestCase):
+    """chat_parser 精确匹配失败后，向量兜底 -> 实时创作，依次尝试。"""
+
+    def test_vector_fallback_matches_existing_command_by_semantic_similarity(self):
+        eat = replace(_command(), narrative_embedding=(1.0, 0.0))
+        events = InMemoryEventRepository({"eat": eat})
+        play_turn = make_play_turn(events, embedding=_FixedEmbeddingPort((1.0, 0.0)))
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "我想吃点东西")
+
+        self.assertEqual(result.command_event_id, "eat")
+
+    def test_vector_fallback_computes_and_caches_embedding_for_seeded_events(self):
+        """回归测试：content/events/*.py 里内置命令走 seed_all() 直接
+        save_event_def() 落库，从来没经过 admin_controller.py::save_event 那条
+        计算 narrative_embedding 的路径——曾经因此天生没有 narrative_embedding，
+        向量兜底对着"吃饭"这种游戏自带命令永远匹配不上，"吃点东西"只会一直
+        "听不懂"。现在应该在第一次用到时现算一次并存回仓库，之后同一个事件
+        命中不用再重新算（跟 _ensure_variants 一样的套路）。"""
+        eat = _command()  # narrative_embedding 默认是空的，模拟内置命令的真实状态
+        self.assertEqual(eat.narrative_embedding, ())
+        events = InMemoryEventRepository({"eat": eat})
+        embedding = _FixedEmbeddingPort((1.0, 0.0))
+        play_turn = make_play_turn(events, embedding=embedding)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "我想吃点东西")
+
+        self.assertEqual(result.command_event_id, "eat")
+        self.assertEqual(events.get_by_id("eat").narrative_embedding, (1.0, 0.0))
+
+    def test_no_embedding_and_no_narrative_writer_still_falls_back_to_parse_failed(self):
+        events = InMemoryEventRepository({"eat": _command()})
+        play_turn = make_play_turn(events)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "今天天气怎么样")
+
+        self.assertIsNotNone(result.parse_error)
+
+    def test_live_author_creates_and_immediately_executes_new_command_when_configured(self):
+        """规则解析 + 向量兜底都没命中，配置了 narrative_writer 时最后一层实时
+        创作——生成的事件立即落库（is_draft=False）并当场执行。"""
+        response = (
+            '[{"tags": ["生活"], "aliases": [], "variants": ["你即兴弹了一曲，'
+            '琴声悠扬。"], "weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
+            '"priority": 5, "result_pool": [], "item_query": ""}]'
+        )
+        client = _FakeLiveClient(response)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "我想弹会儿琴")
+
+        self.assertIsNotNone(result.command_event_id)
+        self.assertTrue(result.command_event_id.startswith("live_"))
+        saved = events.get_by_id(result.command_event_id)
+        self.assertIsNotNone(saved)
+        self.assertFalse(saved.is_draft)
+        self.assertTrue(saved.is_command)
+        self.assertEqual(saved.variants[0].text, "你即兴弹了一曲，琴声悠扬。")
+
+    def test_live_author_rejecting_falls_back_to_parse_failed(self):
+        client = _FakeLiveClient("不是 JSON")
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "asdkjhaskjdh")
+
+        self.assertIsNotNone(result.parse_error)
+        self.assertEqual(len(events.load_event_defs(None)), 0)
+
+    def test_pure_gibberish_never_reaches_the_llm(self):
+        """现场跑真实 GLM 账号时发现的问题：glm-4-flash 就算 prompt 明确写了
+        "说不通就拒绝"，对着纯乱码也会硬编一个场景、甚至扣钱——提示词管不住
+        这个模型，改成本地先挡一层："asdkjhaskjdh" 这种一个汉字都没有的输入，
+        压根不该走到大模型那一步（不管假 client 会返回什么）。"""
+        client = _FakeLiveClient('[{"tags": ["生活"], "aliases": [], "variants": ["瞎编的文案"], '
+                                  '"weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
+                                  '"priority": 5, "result_pool": [{"kind": "state_change", "field": "money", "delta": -10}], '
+                                  '"item_query": ""}]')
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "asdkjhaskjdhaksjdh")
+
+        self.assertIsNotNone(result.parse_error)
+        self.assertEqual(client.calls, 0)  # 根本没调大模型
+        self.assertEqual(agent.money, 10)  # 没有被瞎扣钱
+        self.assertEqual(len(events.load_event_defs(None)), 0)
+
+
+class LooksLikeGibberishTests(unittest.TestCase):
+    def test_pure_ascii_is_gibberish(self):
+        self.assertTrue(_looks_like_gibberish("asdkjhaskjdh"))
+
+    def test_contains_chinese_is_not_gibberish(self):
+        self.assertFalse(_looks_like_gibberish("我想弹会儿琴"))
+
+    def test_mixed_ascii_and_chinese_is_not_gibberish(self):
+        self.assertFalse(_looks_like_gibberish("asdf我想去集市"))
+
+    def test_empty_string_is_gibberish(self):
+        self.assertTrue(_looks_like_gibberish(""))
+
+
+class LiveDestinationAuthoringTests(unittest.TestCase):
+    """移动目的地在世界里找不到时的最后一层兜底：实时创作新地点。"""
+
+    def test_internal_destination_creates_child_location_and_moves_there(self):
+        response = '{"name": "藏经阁", "kind": "集市", "is_internal": true}'
+        client = _FakeLiveClient(response)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, location_id="city", location_type="城市")
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "我想去藏经阁")
+
+        self.assertIsNone(result.reject_reason)
+        new_loc = next(loc for loc in world.mutable_state().locations.values() if loc.name == "藏经阁")
+        self.assertEqual(agent.location_id, new_loc.location_id)
+        self.assertFalse(new_loc.hidden)
+        self.assertTrue(any(
+            r.from_id == "city" and r.to_id == new_loc.location_id for r in world.mutable_state().routes
+        ))
+
+    def test_external_destination_creates_hidden_location_without_moving(self):
+        response = '{"name": "东海仙岛", "kind": "秘境", "is_internal": false}'
+        client = _FakeLiveClient(response)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, location_id="city", location_type="城市")
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "我想去东海仙岛")
+
+        self.assertEqual(agent.location_id, "city")  # 没有移动
+        self.assertIn("尚未对外开放", result.reject_reason)
+        new_loc = next(loc for loc in world.mutable_state().locations.values() if loc.name == "东海仙岛")
+        self.assertTrue(new_loc.hidden)
+        self.assertFalse(new_loc.discovered)
+
+    def test_model_rejecting_nonsense_falls_back_to_not_found_and_creates_nothing(self):
+        client = _FakeLiveClient('{"reject": true}')
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, location_id="city", location_type="城市")
+        world = make_tavern_world()
+        before_count = len(world.mutable_state().locations)
+
+        result = play_turn.handle_player_text(agent, world, "我想去阿卡林星")
+
+        self.assertEqual(agent.location_id, "city")
+        self.assertEqual(result.reject_reason, "找不到「阿卡林星」这个地方。")
+        self.assertEqual(len(world.mutable_state().locations), before_count)
 
 
 class ChainDeliveryOrderTests(unittest.TestCase):

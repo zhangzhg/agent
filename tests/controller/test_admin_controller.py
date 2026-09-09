@@ -173,9 +173,11 @@ class _FakeEmbeddingPort:
         self._vector = vector if vector is not None else [1.0, 0.0]
         self._error = error
         self.last_text = None
+        self.calls: list[str] = []
 
     def embed(self, text):
         self.last_text = text
+        self.calls.append(text)
         if self._error is not None:
             raise self._error
         return self._vector
@@ -227,7 +229,9 @@ class AdminEventPredicateTextAndResultTextTests(unittest.TestCase):
         client = _make_client(embedding=embedding)
         resp = client.post("/api/admin/events", json=self._base_event(predicate_text="玩家境界至少到金丹期"))
         self.assertTrue(resp.json()["ok"])
-        self.assertEqual(embedding.last_text, "玩家境界至少到金丹期")
+        # narrative_embedding（tags+aliases+variants）现在也会调一次 embed()，
+        # 不能再假设 embedding.last_text 就是 predicate_text 那一次调用。
+        self.assertIn("玩家境界至少到金丹期", embedding.calls)
         detail = client.get("/api/admin/events/predtext_test_event").json()
         self.assertEqual(detail["predicate_text"], "玩家境界至少到金丹期")
         self.assertEqual(detail["predicate_embedding"], [0.1, 0.2, 0.3])
@@ -236,7 +240,7 @@ class AdminEventPredicateTextAndResultTextTests(unittest.TestCase):
         embedding = _FakeEmbeddingPort()
         client = _make_client(embedding=embedding)
         client.post("/api/admin/events", json=self._base_event(predicate_text=""))
-        self.assertIsNone(embedding.last_text)  # 空文本不该去调向量服务
+        self.assertNotIn("", embedding.calls)  # 空文本不该去调向量服务
         detail = client.get("/api/admin/events/predtext_test_event").json()
         self.assertEqual(detail["predicate_embedding"], [])
 
@@ -247,6 +251,30 @@ class AdminEventPredicateTextAndResultTextTests(unittest.TestCase):
         self.assertTrue(resp.json()["ok"])
         detail = client.get("/api/admin/events/predtext_test_event").json()
         self.assertEqual(detail["predicate_embedding"], [])
+
+    def test_narrative_embedding_computed_from_tags_aliases_variants(self):
+        """事件叙事贴切度重排用的向量，来源是 tags+aliases+variants 文案拼接，
+        跟 predicate_text 判条件是否成立是两份不同的向量（见 model/services/
+        matching.py 的 narrative_fit_multiplier）。"""
+        embedding = _FakeEmbeddingPort(vector=[0.4, 0.3])
+        client = _make_client(embedding=embedding)
+        resp = client.post("/api/admin/events", json=self._base_event(
+            tags=["奇遇", "机缘"], aliases=["挠头"], variants=[{"text": "一段测试文案。", "weight": 1.0}],
+        ))
+        self.assertTrue(resp.json()["ok"])
+        narrative_call = next((c for c in embedding.calls if "测试文案" in c), None)
+        self.assertIsNotNone(narrative_call)
+        for fragment in ("奇遇", "机缘", "挠头", "一段测试文案。"):
+            self.assertIn(fragment, narrative_call)
+        detail = client.get("/api/admin/events/predtext_test_event").json()
+        self.assertEqual(detail["narrative_embedding"], [0.4, 0.3])
+
+    def test_narrative_embedding_stays_empty_when_no_narrative_source_text(self):
+        embedding = _FakeEmbeddingPort(vector=[0.4, 0.3])
+        client = _make_client(embedding=embedding)
+        client.post("/api/admin/events", json=self._base_event(tags=[], aliases=[], variants=[]))
+        detail = client.get("/api/admin/events/predtext_test_event").json()
+        self.assertEqual(detail["narrative_embedding"], [])
 
     def test_embedding_failure_does_not_fail_save(self):
         embedding = _FakeEmbeddingPort(error=RuntimeError("网络超时"))
