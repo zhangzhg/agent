@@ -117,6 +117,27 @@ class AdminEventTests(unittest.TestCase):
         self.assertEqual(detail["variants"][0]["text"], "测试文案。")
         self.assertTrue(detail["is_draft"])
 
+    def test_description_round_trips_and_shows_in_list(self):
+        """事件管理曾经完全没有"描述"字段——手工录入的事件在列表/表单里只能靠
+        event_id/tags 猜是干什么的，AI 生成或实时创作的事件（event_id 是一串
+        随机字符）更没法一眼看出内容。跟 item/location 已有的 description 补齐
+        成同一个模式。"""
+        client = _make_client()
+        resp = client.post("/api/admin/events", json=self._base_event(description="主街上偶遇卖艺人，掏钱可以看表演"))
+        self.assertTrue(resp.json()["ok"])
+        detail = client.get("/api/admin/events/admin_test_event").json()
+        self.assertEqual(detail["description"], "主街上偶遇卖艺人，掏钱可以看表演")
+        summaries = client.get("/api/admin/events").json()
+        entry = next(e for e in summaries if e["event_id"] == "admin_test_event")
+        self.assertEqual(entry["description"], "主街上偶遇卖艺人，掏钱可以看表演")
+
+    def test_blank_description_defaults_to_empty_string(self):
+        client = _make_client()
+        resp = client.post("/api/admin/events", json=self._base_event())
+        self.assertTrue(resp.json()["ok"])
+        detail = client.get("/api/admin/events/admin_test_event").json()
+        self.assertEqual(detail["description"], "")
+
     def test_bad_predicate_arity_rejected_with_field_error(self):
         client = _make_client()
         bad = self._base_event(predicate={"op": "AND", "items": [{"type": "money_gte", "args": [1, 2]}]})
@@ -552,6 +573,20 @@ class AdminGenerateEventsTests(unittest.TestCase):
         resp = client.post("/api/admin/generate_events", json={"count": 1})
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()["ok"])
+
+    def test_generated_event_gets_fallback_description_from_first_variant(self):
+        """LlmEventFlavorAuthor 不产出专门的描述字段——AI 生成的事件如果留白，
+        列表里除了一串 ai_xxxxxxxx 的 event_id 就什么都看不出来了，拿第一条
+        变体文案顶上当默认描述。"""
+        flavor_author = _FakeEventFlavorAuthor(flavors=[{
+            "tags": ["奇遇"], "aliases": [], "variants": ["你在{地点}钓上了一条通体金红的鱼。"],
+        }])
+        client = _make_client(llm_event_flavor_author=flavor_author)
+        resp = client.post("/api/admin/generate_events", json={"description": "钓鱼", "count": 1})
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        detail = client.get(f"/api/admin/events/{body['event_ids'][0]}").json()
+        self.assertEqual(detail["description"], "你在{地点}钓上了一条通体金红的鱼。")
 
     def test_configured_author_creates_draft_events(self):
         client = _make_client(llm_event_flavor_author=_FakeEventFlavorAuthor())

@@ -32,6 +32,27 @@ class OpenAiCompatibleClient:
         data = response.json()
         return data["choices"][0]["message"]["content"]
 
+    def complete_with_tools(self, messages: list[dict], tools: list[dict]) -> dict:
+        """跟 complete() 是同一个 /chat/completions 端点，多带一个 tools 参数——
+        GLM 的 OpenAI 兼容层支持标准 tools/tool_calls 协议。返回原始 message 对象
+        而不是直接取 content：模型要调工具时 content 可能是 None，tool_calls 才是
+        有效载荷，判断走哪条分支、本地执行、把结果拼回 messages 再问一轮，都是
+        调用方（model/services/llm_tool_loop.py）的事，这里只管收发一次请求。"""
+        response = httpx.post(
+            f"{self._config.base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {self._config.api_key}"},
+            json={
+                "model": self._config.model,
+                "messages": messages,
+                "tools": tools,
+                "temperature": 0.9,
+            },
+            timeout=self._config.timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]
+
     def embed(self, text: str) -> list[float]:
         """EmbeddingPort 的实现——只有事件"触发条件"改用向量相似度判定这一个用途
         在用（model/services/matching.py 的 predicate_text 分支），用的是

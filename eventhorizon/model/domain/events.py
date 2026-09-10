@@ -69,6 +69,11 @@ class GameEventDef:
     schema_version: int = 1
     is_draft: bool = False
     is_command: bool = False  # True=命令型（eat/move），False=第二段奇遇
+    description: str = ""
+    # 给管理员看的简短说明（"这条事件是干什么的"），跟 item/location 已有的
+    # description 字段是同一个定位——纯粹是录入编辑器事件列表/表单里的备注，
+    # 不喂给玩家、不参与判定；跟 predicate_text（触发条件）、result_text（结果）、
+    # variants（玩家看到的叙事文案）都是不同的东西，别混着填。
 
     predicate_text: str = ""
     # 自然语言触发条件（用户显式选择：用向量相似度比较代替结构化谓词比较，接受

@@ -25,6 +25,19 @@ class PendingScenario:
     host_event_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class PendingClarification:
+    """LiveContentAuthor 判断玩家原话缺关键信息时的追问挂起态（README §1.12
+    LiveContentAuthor 例外的一部分）：original_text 是玩家最初那句话，下一句
+    回复会拼接在后面重新尝试创作；attempts 满 3 次还是不够就放弃，回落原有的
+    "听不懂"/"找不到地方"文案，不会无限追问下去。跟 PendingScenario 同类，存在
+    Agent 上才能进快照。"""
+
+    original_text: str
+    kind: str  # "command" | "location"
+    attempts: int = 0
+
+
 @dataclass(slots=True)
 class BiographyEntry:
     at: GameTime
@@ -206,6 +219,7 @@ class Agent:
     # —— 交互流程的挂起态（GAME_DESIGN §1.1 / §4.3，与 pending_encounter 同类，必须进快照）——
     turn_count: int = 0  # 已处理的玩家输入轮数；驱动"提示只出现在前 3 轮"（§1.1）
     pending_retreat_prompt: bool = False  # 已说"闭关"，等待"闭关多久"的回答（§4.3）
+    pending_clarification: PendingClarification | None = None  # LiveContentAuthor 追问补全
     consecutive_breakthrough_failures: int = 0  # 连续突破失败次数，达阈值触发走火入魔（§7.2）
 
     # —— NPC 标记（README 1.5.2 日程系统用它筛选"谁该被日程巡检"）——

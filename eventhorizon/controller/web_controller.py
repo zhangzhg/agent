@@ -56,13 +56,13 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     llm_config = load_llm_config()
     llm_client = OpenAiCompatibleClient(llm_config) if llm_config.configured else None
-    # embed() 和 complete() 用的是同一个 OpenAiCompatibleClient 实例（同一个连接，
-    # 两种能力）；FallbackEmbeddingClient 包一层三层兜底链（GLM -> 本地模型
-    # BAAI/bge-small-zh-v1.5 -> 字符哈希，见 model/services/local_embedding.py），
-    # 永远不是 None——GLM 没配置/没有 embedding 额度（这个账号目前就是如此）时
-    # 自动落到本地模型，predicate_text 向量判定、物品匹配、事件叙事重排各处
-    # 原有的"向量模块关闭"fail-open 分支不会再触发。
-    embedding_client = FallbackEmbeddingClient(llm_client if llm_config.embedding_configured else None)
+    # complete() 走远端 GLM；向量化不走——这个账号的 embedding 额度已经确认没有
+    # （/embeddings 恒 429），每次先打一遍远端再等它失败没有意义，只是白白多一趟
+    # 网络往返、刷一堆没用的失败日志。FallbackEmbeddingClient 传 None 当"主力
+    # 客户端"，embed_with_fallback（model/services/local_embedding.py）直接从
+    # 本地模型 BAAI/bge-small-zh-v1.5 起步（再往下才是字符哈希兜底），predicate_text
+    # 向量判定、物品匹配、事件叙事重排各处照常拿到能用的向量，不受影响。
+    embedding_client = FallbackEmbeddingClient(None)
     # narrative_writer 复用同一个 complete()——LlmEventWriter（README 对局第二段
     # 表格）：事件命中但 variants 留空时现场补一句文案，见 PlayTurnService._ensure_variants。
 

@@ -215,7 +215,7 @@ def register_admin_routes(
         return [
             EventSummaryDTO(
                 event_id=e.event_id, tags=list(e.tags), applicable_locations=list(e.applicable_locations),
-                is_command=e.is_command, is_draft=e.is_draft, weight=e.weight,
+                is_command=e.is_command, is_draft=e.is_draft, weight=e.weight, description=e.description,
             )
             for e in app_ctx.events.list_all()
         ]
@@ -249,7 +249,8 @@ def register_admin_routes(
         # 硬门槛，所以直接走三层兜底链，不用像 predicate_text 那样区分"没配置
         # embedding"——反正拿不到向量时 matching.py 那边会自然按中性乘子处理。
         narrative_text = " ".join(
-            list(raw.get("tags") or [])
+            [str(raw.get("description") or "")]
+            + list(raw.get("tags") or [])
             + list(raw.get("aliases") or [])
             + [str(v.get("text", "")) for v in (raw.get("variants") or [])]
         ).strip()
@@ -319,6 +320,9 @@ def register_admin_routes(
                 "variants": [{"text": text, "weight": 1.0} for text in variants],
                 "is_draft": True,
                 "is_command": bool(aliases),
+                # LlmEventFlavorAuthor 不产出专门的描述字段——AI 生成的事件列表里
+                # 总不能一片空白，拿第一条变体文案顶上，管理员觉得不合适可以自己改。
+                "description": variants[0] if variants else "",
                 "narrative_embedding": list(embed_with_fallback(embedding, narrative_text)) if narrative_text else [],
             }
             defn, errors = validate_event_def(raw, catalog)
@@ -454,6 +458,7 @@ def _event_to_dto(defn: GameEventDef) -> EventDetailDTO:
         scenario_ref=defn.scenario_ref,
         is_draft=defn.is_draft,
         is_command=defn.is_command,
+        description=defn.description,
         predicate_text=defn.predicate_text,
         predicate_embedding=list(defn.predicate_embedding),
         result_text=defn.result_text,

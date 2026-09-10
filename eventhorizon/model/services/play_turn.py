@@ -23,7 +23,7 @@ from model.domain.system_events import AgentStateChanged
 from model.services.arbiter import ArbitrationDecision, EventArbiter
 from model.services.chat_parser import MOVE_EVENT_ID, ParsedCommand, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
 from model.services.event_validation import ValidationCatalog, validate_event_def
-from model.services.live_content_author import LiveContentAuthor
+from model.services.live_content_author import LiveAuthorOutcome, LiveContentAuthor
 from model.services.live_narrative_writer import generate_live_variant_text
 from model.services.matching import (
     MatchContext,
@@ -166,14 +166,28 @@ class PlayTurnService:
                 return resolved
             self._abandon_pending(agent)  # 玩家改主意：挂起项按"错过"清掉，经 diff 落库
 
+        # 1.5) 追问补全——LiveContentAuthor 上一句判断信息不全时挂起等这一句
+        # （README §1.12 LiveContentAuthor 例外，最多追问 3 次，见 _resolve_clarification）。
+        if agent.pending_clarification is not None:
+            return self._resolve_clarification(agent, world, raw)
+
         # 2) 常规命令：规则解析器 -> 向量意图兜底 -> 实时大模型创作，三层依次尝试
         cmd = self.parser.parse(raw, agent.scene_focus)
         if cmd is None:
             cmd = self._match_command_by_intent(raw, agent)
         if cmd is None:
-            cmd = self._author_live_command(agent, raw)
+            outcome = self._author_live_command(agent, raw)
+            resolved = self._resolve_command_outcome(agent, outcome, raw, prior_attempts=0)
+            if isinstance(resolved, TurnResult):
+                return resolved
+            cmd = resolved
         if cmd is None:
             return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+        return self._dispatch_command(agent, world, cmd)
+
+    def _dispatch_command(self, agent: "Agent", world: "WorldView", cmd) -> TurnResult:
+        """一条已经确定下来的 ParsedCommand 该怎么执行——不管它是规则解析器/向量
+        兜底/实时创作/追问补全哪条路径给出来的，落地逻辑都是同一套。"""
         if cmd.is_query or cmd.event_id in QUERY_EVENT_IDS:
             # 只读查询命令由 controller 直接调只读服务处理，不该走到这里；防御性拒绝。
             return TurnResult.rejected("这个只能查，改变不了什么，换句话说说你想做什么？")
@@ -188,6 +202,41 @@ class PlayTurnService:
         defn = self._ensure_variants(defn)
         occ = self._new_occurrence(agent, defn, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, defn) or TurnResult.rejected("现在做不了这个。")
+
+    def _set_pending_clarification(self, agent: "Agent", original_text: str, kind: str, attempts: int) -> None:
+        from model.domain.agent import PendingClarification
+
+        apply_agent_diff(agent, AppliedDiff(
+            pending_clarification_set=PendingClarification(original_text=original_text, kind=kind, attempts=attempts)
+        ))
+
+    def _clear_pending_clarification(self, agent: "Agent") -> None:
+        if agent.pending_clarification is not None:
+            apply_agent_diff(agent, AppliedDiff(pending_clarification_set=None))
+
+    def _resolve_clarification(self, agent: "Agent", world: "WorldView", raw: str) -> TurnResult:
+        """追问回来的这句话，跟玩家最初那句拼在一起重新尝试创作——不重新走规则
+        解析/向量兜底（那两层已经在第一次就试过判定不了了），直接回到失败的那
+        一层继续。成不成、要不要再问一次，都由 _resolve_command_outcome/
+        _resolve_location_outcome 统一处理（这两个函数在这里和"第一次就失败"
+        两条路径上共用，是同一套 3 次上限逻辑）。"""
+        pending = agent.pending_clarification
+        combined = f"{pending.original_text}（补充：{raw}）"
+        if pending.kind == "command":
+            outcome = self._author_live_command(agent, combined)
+            resolved = self._resolve_command_outcome(agent, outcome, combined, pending.attempts)
+            if isinstance(resolved, TurnResult):
+                return resolved
+            if resolved is None:
+                return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+            return self._dispatch_command(agent, world, resolved)
+        outcome = self._author_live_destination_outcome(agent, world, combined)
+        resolved = self._resolve_location_outcome(agent, world, outcome, combined, pending.attempts)
+        if isinstance(resolved, TurnResult):
+            return resolved
+        if resolved is None:
+            return TurnResult.rejected(f"找不到「{combined}」这个地方。")
+        return self._complete_move(agent, world, resolved)
 
     def _soft_guidance_message(self, agent: "Agent", world: "WorldView") -> str:
         """GAME_DESIGN §1.1：前 3 轮给软性引导（从当前地点合格池现取别名举例），
@@ -233,30 +282,49 @@ class PlayTurnService:
         self.events.save_event_def(patched)
         return patched
 
-    def _author_live_command(self, agent: "Agent", raw: str) -> "ParsedCommand | None":
-        """规则解析 + 向量兜底都没命中——最后一层：实时调大模型创作一条新命令型
-        事件，立即落库生效（LiveContentAuthor，README §1.12 的有意识例外，见
-        live_content_author.py 顶部说明）。没配置大模型（self._live_content_author
-        为 None）直接跳过，走原有"听不懂"。"""
+    def _author_live_command(self, agent: "Agent", raw: str) -> LiveAuthorOutcome:
+        """规则解析 + 向量兜底都没命中——最后一层：实时调大模型判断这句话该
+        怎么办（LiveContentAuthor，README §1.12 的有意识例外，见
+        live_content_author.py 顶部说明）。没配置大模型/一个汉字都没有的纯乱码
+        直接判 reject，不走到大模型那一步（见 _looks_like_gibberish 的说明）。"""
         if self._live_content_author is None or _looks_like_gibberish(raw):
-            return None
-        raw_event = self._live_content_author.author_command_event(raw, agent.location_type)
-        if raw_event is None:
+            return LiveAuthorOutcome(kind="reject")
+        return self._live_content_author.author_command_event(raw, agent.location_type)
+
+    def _resolve_command_outcome(
+        self, agent: "Agent", outcome: LiveAuthorOutcome, original_text: str, prior_attempts: int
+    ) -> "ParsedCommand | TurnResult | None":
+        """把 LiveAuthorOutcome 的三态落地：needs_clarification 挂起追问（最多真的
+        问出 3 次，第 4 次评估时还不够就放弃——attempts 记的是"已经问出去几次"，
+        不是"已经失败几次"，超过 3 才放弃，不是到 3 就放弃）、reject 交回调用方
+        原有的"听不懂"文案（返回 None）、ready 才真的校验+落库+返回可执行的
+        ParsedCommand。"""
+        if outcome.kind == "needs_clarification" and outcome.question:
+            attempts = prior_attempts + 1
+            if attempts > 3:
+                self._clear_pending_clarification(agent)
+                return None
+            self._set_pending_clarification(agent, original_text, "command", attempts)
+            return TurnResult(freeform_narrative=outcome.question)
+        self._clear_pending_clarification(agent)
+        if outcome.kind != "ready" or outcome.command_raw is None:
             return None
         event_id = "live_" + uuid.uuid4().hex[:10]
         raw_event = {
-            **raw_event,
+            **outcome.command_raw,
             "event_id": event_id,
             "applicable_locations": [agent.location_type],
             "predicate": None,
-            "aliases": list(dict.fromkeys([*raw_event.get("aliases", []), raw.strip()])),
-            # LlmEventFlavorAuthor 的 variants 是纯字符串列表，validate_event_def
+            "aliases": list(dict.fromkeys([*outcome.command_raw.get("aliases", []), original_text.strip()])),
+            # LiveContentAuthor 的 variants 是纯字符串列表，validate_event_def
             # 要的是 {"text":..., "weight":...} 字典——跟 admin_controller.py::
-            # generate_events 里同样的转换，两处生成器共用的是同一个 Author，输出
-            # 形状必须一致处理。
-            "variants": [{"text": text, "weight": 1.0} for text in raw_event.get("variants", [])],
+            # generate_events 里同样的转换。
+            "variants": [{"text": text, "weight": 1.0} for text in outcome.command_raw.get("variants", [])],
             "is_draft": False,
             "is_command": True,
+            # 实时创作没有专门的描述字段——管理员事后在编辑器里翻到这条 live_
+            # 开头的事件时，总不能只看到一个 id，拿第一条变体文案顶上。
+            "description": (outcome.command_raw.get("variants") or [""])[0],
         }
         # load_event_defs(None) 不是 list_all()：list_all() 明确标注"只供录入编辑器
         # 用，对局路径必须走 load_event_defs()"（草稿会被过滤掉），这里虽然只是拿
@@ -285,14 +353,17 @@ class PlayTurnService:
             return TurnResult.rejected("现在走不开。")
         destination = world.find_location_by_name(cmd.location_hint) if cmd.location_hint else None
         if destination is None and cmd.location_hint:
-            outcome = self._author_live_destination(agent, world, cmd.location_hint)
-            if outcome is not None:
-                if isinstance(outcome, TurnResult):
-                    return outcome  # 外部地点：新建了隐藏节点，但这一步不移动
-                destination = outcome  # 内部子地点：新建完直接当成这次移动的目的地
+            outcome = self._author_live_destination_outcome(agent, world, cmd.location_hint)
+            resolved = self._resolve_location_outcome(agent, world, outcome, cmd.location_hint, prior_attempts=0)
+            if isinstance(resolved, TurnResult):
+                return resolved
+            destination = resolved
         if destination is None:
             hint = cmd.location_hint or "那里"
             return TurnResult.rejected(f"找不到「{hint}」这个地方。")
+        return self._complete_move(agent, world, destination)
+
+    def _complete_move(self, agent: "Agent", world: "WorldView", destination) -> TurnResult:
         base = self._ensure_variants(self.events.get_by_id(MOVE_EVENT_ID) or default_move_def())
         synthetic = replace(
             base, result_pool=(StateChange(field="location", set_to=destination.location_id),), predicate=None, is_command=True
@@ -300,28 +371,63 @@ class PlayTurnService:
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, synthetic) or TurnResult.rejected("现在做不了这个。")
 
-    def _author_live_destination(self, agent: "Agent", world: "WorldView", hint: str) -> "Location | TurnResult | None":
+    def _list_visible_locations(self, world: "WorldView") -> list[dict]:
+        """给 LiveContentAuthor 的 list_locations 工具用（真正的 function calling，
+        见 live_content_author.py/llm_tool_loop.py）——只列玩家看得到的地点，
+        隐藏未发现的不给：不能让模型拿神识扫描都没发现的秘境当"已有地点"回答
+        玩家，跟 WorldView.find_location_by_name 的可见性规则一致。"""
+        state = world.mutable_state()
+        return [
+            {"location_id": loc.location_id, "name": loc.name, "location_type": loc.location_type}
+            for loc in state.locations.values()
+            if not loc.hidden or loc.discovered
+        ]
+
+    def _author_live_destination_outcome(self, agent: "Agent", world: "WorldView", hint: str) -> LiveAuthorOutcome:
         """`find_location_by_name` 找不到目的地时的最后一层兜底——实时创作一个新
         地点（LiveContentAuthor，README §1.12 的有意识例外，见 live_content_author.py
-        顶部说明）。返回 `Location` 表示"内部子地点，新建完直接当这次移动的目的
-        地"；返回 `TurnResult` 表示"外部地点，新建了隐藏节点但这次不移动"；返回
-        `None` 表示模型判断这句话说不通/没配置大模型，调用方回落原有"找不到"文案。
+        顶部说明），带 list_locations 工具查真实地点数据。"""
+        if self._live_content_author is None or _looks_like_gibberish(hint):
+            return LiveAuthorOutcome(kind="reject")
+        current_name = world.name_of(agent.location_id)
+        current_type = world.location_type_of(agent.location_id)
+        return self._live_content_author.author_location(
+            hint, current_name, current_type, lambda: self._list_visible_locations(world)
+        )
+
+    def _resolve_location_outcome(
+        self, agent: "Agent", world: "WorldView", outcome: LiveAuthorOutcome, original_text: str, prior_attempts: int
+    ) -> "Location | TurnResult | None":
+        """把 LiveAuthorOutcome 的三态（外加"其实是已有地点"这个第四种情况）落地：
+        needs_clarification 挂起追问（满 3 次放弃，回落"找不到"）；reject 返回
+        None 交回调用方原有的"找不到"文案；ready 时——`existing_location_id` 命中
+        就直接返回那个已有 Location（不新建）；否则按 is_internal 新建子地点
+        （+ 一条连回当前地点的 Route，当场可达）或新建隐藏地点（不移动、告知
+        "尚未对外开放"）。
 
         新地点/新路线直接写进 `world.mutable_state()`——不需要额外接线持久化：
         `world` 是 ChatController 每回合传进来的同一个引用，回合结束后
         ChatController 本来就会无条件 `world_repo.save(...)`（chat_controller.py），
         这里改了内存里的 WorldState，会跟着这次回合一起整份存盘。"""
-        if self._live_content_author is None or _looks_like_gibberish(hint):
+        if outcome.kind == "needs_clarification" and outcome.question:
+            attempts = prior_attempts + 1  # 已经问出去几次，超过 3 才放弃（见 _resolve_command_outcome 的同款注释）
+            if attempts > 3:
+                self._clear_pending_clarification(agent)
+                return None
+            self._set_pending_clarification(agent, original_text, "location", attempts)
+            return TurnResult(freeform_narrative=outcome.question)
+        self._clear_pending_clarification(agent)
+        if outcome.kind != "ready":
             return None
         state = world.mutable_state()
-        current = state.get(agent.location_id)
-        current_name = world.name_of(agent.location_id)
-        current_type = world.location_type_of(agent.location_id)
-        decision = self._live_content_author.author_location(hint, current_name, current_type)
-        if decision is None:
+        if outcome.existing_location_id:
+            return state.locations.get(outcome.existing_location_id)
+        if outcome.location_decision is None:
             return None
         from model.domain.map import Location, LocationKind, Route
 
+        decision = outcome.location_decision
+        current = state.get(agent.location_id)
         new_id = "loc_" + uuid.uuid4().hex[:10]
         if decision.is_internal:
             parent_id = current.parent_location_id if current is not None and current.parent_location_id else agent.location_id

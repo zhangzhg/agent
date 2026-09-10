@@ -279,7 +279,10 @@ class _FixedEmbeddingPort:
 
 class _FakeLiveClient:
     """LiveContentAuthor 用的假 LlmClient——固定返回一段 JSON 文本，不管 prompt
-    具体是什么（这些测试关心的是接线是否正确，不是 prompt 内容）。"""
+    具体是什么（这些测试关心的是接线是否正确，不是 prompt 内容）。author_location
+    走 complete_with_tools()（真正的 function calling，见 llm_tool_loop.py），这里
+    直接给最终答案、不模拟工具调用——工具调用本身的round-trip 在
+    test_live_content_author.py 里单独测过。"""
 
     def __init__(self, response: str):
         self.response = response
@@ -288,6 +291,28 @@ class _FakeLiveClient:
     def complete(self, prompt):
         self.calls += 1
         return self.response
+
+    def complete_with_tools(self, messages, tools):
+        self.calls += 1
+        return {"content": self.response}
+
+
+class _SequencedFakeLiveClient:
+    """跟 _FakeLiveClient 不同的是每次调用按顺序弹出下一个预设回复——用于测试
+    追问补全这种"同一个 LiveContentAuthor 方法被连续调用好几轮，每轮回复不同"
+    的场景。"""
+
+    def __init__(self, responses: list[str]):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def complete(self, prompt):
+        self.calls += 1
+        return self._responses.pop(0)
+
+    def complete_with_tools(self, messages, tools):
+        self.calls += 1
+        return {"content": self._responses.pop(0)}
 
 
 class CommandIntentFallbackTests(unittest.TestCase):
@@ -357,6 +382,9 @@ class CommandIntentFallbackTests(unittest.TestCase):
         self.assertFalse(saved.is_draft)
         self.assertTrue(saved.is_command)
         self.assertEqual(saved.variants[0].text, "你即兴弹了一曲，琴声悠扬。")
+        # 实时创作没有专门的描述字段——拿第一条变体文案顶上，事件管理列表里
+        # 才不会只看到一串 live_xxxxxxxx 的 event_id。
+        self.assertEqual(saved.description, "你即兴弹了一曲，琴声悠扬。")
 
     def test_live_author_rejecting_falls_back_to_parse_failed(self):
         client = _FakeLiveClient("不是 JSON")
@@ -456,6 +484,83 @@ class LiveDestinationAuthoringTests(unittest.TestCase):
         self.assertEqual(agent.location_id, "city")
         self.assertEqual(result.reject_reason, "找不到「阿卡林星」这个地方。")
         self.assertEqual(len(world.mutable_state().locations), before_count)
+
+
+class PendingClarificationTests(unittest.TestCase):
+    """LiveContentAuthor 判断信息不全时的追问挂起态——最多真的问出 3 次，
+    第 4 次评估时还不够就放弃、清挂起态、回落原有文案。"""
+
+    def test_command_clarification_resolves_after_one_followup(self):
+        client = _SequencedFakeLiveClient([
+            '{"needs_clarification": true, "question": "你想对谁做这件事？"}',
+            '[{"tags": ["生活"], "aliases": [], "variants": ["你教训了那个泼皮。"], '
+            '"weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
+            '"priority": 5, "result_pool": [], "item_query": ""}]',
+        ])
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        first = play_turn.handle_player_text(agent, world, "教训一下")
+        self.assertEqual(first.freeform_narrative, "你想对谁做这件事？")
+        self.assertIsNotNone(agent.pending_clarification)
+        self.assertEqual(agent.pending_clarification.kind, "command")
+        self.assertEqual(agent.pending_clarification.attempts, 1)
+
+        second = play_turn.handle_player_text(agent, world, "那个泼皮")
+        self.assertIsNone(agent.pending_clarification)
+        self.assertIsNotNone(second.command_event_id)
+        self.assertTrue(second.command_event_id.startswith("live_"))
+        saved = events.get_by_id(second.command_event_id)
+        self.assertEqual(saved.variants[0].text, "你教训了那个泼皮。")
+
+    def test_location_clarification_resolves_after_one_followup(self):
+        client = _SequencedFakeLiveClient([
+            '{"needs_clarification": true, "question": "你是想找个僻静角落，还是想去别的城市？"}',
+            '{"name": "藏经阁", "kind": "集市", "is_internal": true}',
+        ])
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, location_id="city", location_type="城市")
+        world = make_tavern_world()
+
+        first = play_turn.handle_player_text(agent, world, "我想去别的地方")
+        self.assertEqual(first.freeform_narrative, "你是想找个僻静角落，还是想去别的城市？")
+        self.assertEqual(agent.pending_clarification.kind, "location")
+
+        second = play_turn.handle_player_text(agent, world, "找个热闹的地方逛逛")
+        self.assertIsNone(agent.pending_clarification)
+        new_loc = next(loc for loc in world.mutable_state().locations.values() if loc.name == "藏经阁")
+        self.assertEqual(agent.location_id, new_loc.location_id)
+
+    def test_gives_up_after_three_questions_asked(self):
+        """连续 4 轮评估都说信息不全——前 3 次应该真的问出来，第 4 次评估时才
+        放弃、清挂起态、回落"听不懂"，不会无限问下去。"""
+        question = '{"needs_clarification": true, "question": "能说得再具体点吗？"}'
+        client = _SequencedFakeLiveClient([question, question, question, question])
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        r1 = play_turn.handle_player_text(agent, world, "做点什么")
+        self.assertEqual(r1.freeform_narrative, "能说得再具体点吗？")
+        self.assertEqual(agent.pending_clarification.attempts, 1)
+
+        r2 = play_turn.handle_player_text(agent, world, "就做点事")
+        self.assertEqual(r2.freeform_narrative, "能说得再具体点吗？")
+        self.assertEqual(agent.pending_clarification.attempts, 2)
+
+        r3 = play_turn.handle_player_text(agent, world, "反正就做点事")
+        self.assertEqual(r3.freeform_narrative, "能说得再具体点吗？")
+        self.assertEqual(agent.pending_clarification.attempts, 3)
+
+        r4 = play_turn.handle_player_text(agent, world, "还是做点事")
+        self.assertIsNone(agent.pending_clarification)  # 放弃了，挂起态清掉
+        self.assertIsNotNone(r4.parse_error)  # 回落原有"听不懂"文案
+        self.assertEqual(client.calls, 4)
+        self.assertEqual(len(events.load_event_defs(None)), 0)  # 没有落库任何半成品
 
 
 class ChainDeliveryOrderTests(unittest.TestCase):

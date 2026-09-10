@@ -129,6 +129,28 @@
 
   /* ---------- 右侧属性面板：地点/路线列表 <-> 详情表单，同一块地方切换，不弹窗 ---------- */
   .modal-footer { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  /* ---------- 真正的弹窗（目前只有"AI 生成事件"用）---------- */
+  .overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55);
+    align-items: center; justify-content: center; z-index: 100;
+  }
+  .overlay.active { display: flex; }
+  .overlay-box {
+    background: var(--panel-bg); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow-md); width: min(520px, 90vw); max-height: 85vh; overflow-y: auto;
+    padding: 18px 20px;
+  }
+  .overlay-box .overlay-header {
+    display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px;
+  }
+  .overlay-box .overlay-header h3 { margin: 0; font-size: 15px; color: var(--accent); font-weight: 600; }
+  .overlay-box .overlay-close {
+    background: none; border: none; color: var(--text-dim); font-size: 18px; line-height: 1; cursor: pointer;
+    padding: 2px 6px;
+  }
+  .overlay-box .overlay-close:hover { color: var(--text); }
+  .overlay-box fieldset { border: none; padding: 0; margin: 0; }
+  .overlay-box legend { display: none; }  /* 标题已经在 overlay-header 里了，fieldset 自带的 legend 不用再显示一遍 */
   /* 事件页 保存草稿/发布/撤回为草稿/删除 四个按钮：2x2 网格分两行放，比一行挤四个
      或自动换行更整齐，也不会因为列宽变化忽宽忽窄。 */
   .event-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
@@ -348,31 +370,20 @@
   <div class="cols">
     <div class="col" style="flex: 0 0 260px;">
       <button class="btn secondary" style="margin-bottom:8px" onclick="clearEventForm()">+ 新建事件</button>
-      <input type="text" id="event-search" placeholder="搜索 event_id / 标签…" oninput="renderEventList()" />
+      <button class="btn secondary" style="margin-bottom:8px" onclick="openEventGenModal()">AI 生成事件</button>
+      <input type="text" id="event-search" placeholder="搜索 event_id / 标签 / 描述…" oninput="renderEventList()" />
       <div class="scroll-list"><table><tbody id="event-list"></tbody></table></div>
     </div>
     <div class="col">
       <div class="scroll-panel">
-      <fieldset>
-        <legend>AI 生成事件（可参考小说情节）</legend>
-        <label>情节描述 / 灵感来源（留空则由 AI 自由发挥）</label>
-        <textarea id="evgen-description" style="min-height:90px" placeholder="例：酒楼里有人钓到金龙鱼，围观后可买；有钱则鱼或为龙，给报酬——可以直接引用/改写小说桥段；留空就让 AI 自己构思场景"></textarea>
-        <div class="row2">
-          <div><label>适用地点类型（逗号分隔，"*" 表示任意）</label><input type="text" id="evgen-locations" value="*" /></div>
-          <div><label>数量</label><input type="number" id="evgen-count" value="3" min="1" max="10" /></div>
-        </div>
-        <div class="hint">AI 只负责标签/聊天别名/叙事文案，会参考上面的情节描述——留空的话由 AI 自己构思一个合适的场景；权重/冷却/触发条件等机制字段由程序填安全默认值。生成的都是草稿，进左侧列表后可逐条检查/编辑/发布，不会直接进合格池。需要先配置 eventhorizon/llm_config.json。</div>
-        <div class="errors" id="evgen-errors"></div>
-        <div class="ok-msg" id="evgen-status"></div>
-        <button class="btn secondary" id="evgen-run-btn" onclick="runGenerateEvents()">生成</button>
-      </fieldset>
-
       <fieldset>
         <legend>基础信息</legend>
         <div class="row2">
           <div><label>event_id</label><input type="text" id="ev-id" /></div>
           <div><label>优先级 priority</label><input type="number" id="ev-priority" value="5" /></div>
         </div>
+        <label>描述（给管理员看的简短说明，不给玩家看，事件列表里显示这个）</label>
+        <input type="text" id="ev-description" placeholder="例：主街上偶遇卖艺人，掏钱可以看表演" />
         <label>适用地点类型（逗号分隔，"*" 表示任意）</label><input type="text" id="ev-locations" value="*" />
         <label>适用时辰（逗号分隔的 0-11，留空=任意）</label><input type="text" id="ev-time" />
         <div class="row2">
@@ -419,6 +430,29 @@
         <div class="ok-msg" id="ev-ok"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- AI 生成事件——弹窗，不占事件页表单列的位置（"+ 新建事件"旁边的按钮打开） -->
+<div class="overlay" id="evgen-overlay" onclick="if (event.target === this) closeEventGenModal()">
+  <div class="overlay-box">
+    <div class="overlay-header">
+      <h3>AI 生成事件（可参考小说情节）</h3>
+      <button class="overlay-close" onclick="closeEventGenModal()">×</button>
+    </div>
+    <fieldset>
+      <legend>AI 生成事件（可参考小说情节）</legend>
+      <label>情节描述 / 灵感来源（留空则由 AI 自由发挥）</label>
+      <textarea id="evgen-description" style="min-height:90px" placeholder="例：酒楼里有人钓到金龙鱼，围观后可买；有钱则鱼或为龙，给报酬——可以直接引用/改写小说桥段；留空就让 AI 自己构思场景"></textarea>
+      <div class="row2">
+        <div><label>适用地点类型（逗号分隔，"*" 表示任意）</label><input type="text" id="evgen-locations" value="*" /></div>
+        <div><label>数量</label><input type="number" id="evgen-count" value="3" min="1" max="10" /></div>
+      </div>
+      <div class="hint">AI 只负责标签/聊天别名/叙事文案，会参考上面的情节描述——留空的话由 AI 自己构思一个合适的场景；权重/冷却/触发条件等机制字段由程序填安全默认值。生成的都是草稿，进左侧列表后可逐条检查/编辑/发布，不会直接进合格池。需要先配置 eventhorizon/llm_config.json。</div>
+      <div class="errors" id="evgen-errors"></div>
+      <div class="ok-msg" id="evgen-status"></div>
+      <button class="btn secondary" id="evgen-run-btn" onclick="runGenerateEvents()">生成</button>
+    </fieldset>
   </div>
 </div>
 
@@ -861,8 +895,10 @@ function renderRelatedEvents(loc) {
     box.innerHTML = `<div class="hint">没有已发布事件匹配 location_type="${loc.location_type}"。</div>`;
     return;
   }
-  box.innerHTML = matches.map(e =>
-    `<div class="related-event-row">${e.event_id}<span class="hint">（${e.tags.join(",")}）</span></div>`).join("");
+  box.innerHTML = matches.map(e => {
+    const desc = e.description ? `：${escapeHtml(e.description)}` : "";
+    return `<div class="related-event-row">${e.event_id}<span class="hint">（${e.tags.join(",")}）</span>${desc}</div>`;
+  }).join("");
 }
 
 function showLocationDetail(loc, coords) {
@@ -1228,16 +1264,23 @@ async function loadEvents() {
   }
 }
 
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 function renderEventList() {
   const q = ($("event-search").value || "").toLowerCase();
   const body = $("event-list");
   body.innerHTML = "";
   for (const e of events) {
-    const hay = (e.event_id + " " + e.tags.join(" ")).toLowerCase();
+    const hay = (e.event_id + " " + e.tags.join(" ") + " " + (e.description || "")).toLowerCase();
     if (q && !hay.includes(q)) continue;
     const tr = document.createElement("tr");
     const badge = e.is_draft ? '<span class="badge draft">草稿</span>' : '<span class="badge published">已发布</span>';
-    tr.innerHTML = `<td>${e.event_id}<br/>${badge} ${e.tags.join(",")}</td>`;
+    const desc = e.description ? `<div class="hint" style="margin:2px 0 0">${escapeHtml(e.description)}</div>` : "";
+    tr.innerHTML = `<td>${e.event_id}<br/>${badge} ${e.tags.join(",")}${desc}</td>`;
     tr.addEventListener("click", () => loadEventDetail(e.event_id));
     body.appendChild(tr);
   }
@@ -1256,6 +1299,7 @@ let loadedEventReplyOptions = [];
 async function loadEventDetail(id) {
   const d = await api("GET", `/api/admin/events/${encodeURIComponent(id)}`);
   $("ev-id").value = d.event_id; $("ev-priority").value = d.priority;
+  $("ev-description").value = d.description || "";
   $("ev-locations").value = arrToCsv(d.applicable_locations);
   $("ev-time").value = arrToCsv(d.applicable_time);
   $("ev-weight").value = d.weight; $("ev-duration").value = d.duration_shichen;
@@ -1278,7 +1322,7 @@ async function loadEventDetail(id) {
 }
 
 function clearEventForm() {
-  for (const id of ["ev-id","ev-time","ev-max-trigger","ev-tags","ev-exclusive","ev-aliases","ev-scenario-ref",
+  for (const id of ["ev-id","ev-description","ev-time","ev-max-trigger","ev-tags","ev-exclusive","ev-aliases","ev-scenario-ref",
                      "ev-predicate-text","ev-result-text"]) $(id).value = "";
   $("ev-locations").value = "*"; $("ev-priority").value = "5"; $("ev-weight").value = "1.0";
   $("ev-duration").value = "1"; $("ev-cooldown").value = "0";
@@ -1293,6 +1337,7 @@ function buildEventDto() {
   const resultText = $("ev-result-text").value.trim();
   return {
     event_id: $("ev-id").value.trim(),
+    description: $("ev-description").value.trim(),
     applicable_locations: csvToArr($("ev-locations").value) || ["*"],
     applicable_time: $("ev-time").value.trim() ? csvToArr($("ev-time").value).map(Number) : null,
     predicate: loadedEventPredicate,  // 旧版结构化谓词原样带回去，这套表单不改它
@@ -1320,6 +1365,10 @@ function buildEventDto() {
 // ---------- 事件：AI 生成（参考情节描述，出草稿；不像地点/物品生成器那样有本地
 // 兜底——叙事文案离不开真的语言模型，本地词库拼不出"像小说片段"的东西，AI 不可用
 // 就老实报错，不拿一句敷衍文案糊弄过去）----------
+// 弹窗而不是常驻在表单列顶部：这块只是偶尔用一次的辅助工具，常驻会把"基础信息"
+// 这些每次都要看的字段往下挤；生成完不自动关，方便看状态提示/接着再生成一批。
+function openEventGenModal() { $("evgen-overlay").classList.add("active"); }
+function closeEventGenModal() { $("evgen-overlay").classList.remove("active"); }
 async function runGenerateEvents() {
   // 情节描述允许留空——留空就是明确要 AI 自己构思场景，不当成"忘了填"去拦。
   const description = $("evgen-description").value.trim();

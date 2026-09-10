@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from model.domain.cause import CauseLink
 
 if TYPE_CHECKING:
-    from model.domain.agent import Agent, PendingScenario
+    from model.domain.agent import Agent, PendingClarification, PendingScenario
     from model.domain.map import WorldState
 
 
@@ -38,6 +38,7 @@ class AppliedDiff:
     pending_scenario_set: "PendingScenario | None | str" = "__unset__"  # "__unset__" 哨兵：未涉及；None：显式清空
     state_set: str | None = None  # 状态机结果也进 diff，重放才能还原挂起态
     pending_retreat_prompt_set: bool | None = None  # 闭关"要多久"追问的挂起标记（GAME_DESIGN §4.3）
+    pending_clarification_set: "PendingClarification | None | str" = "__unset__"  # 同 pending_scenario_set 的哨兵语义
 
 
 _UNSET = "__unset__"
@@ -71,6 +72,9 @@ def merge(a: AppliedDiff, b: AppliedDiff) -> AppliedDiff:
         deltas[key] = deltas.get(key, 0.0) + value
 
     pending_scenario = b.pending_scenario_set if b.pending_scenario_set != _UNSET else a.pending_scenario_set
+    pending_clarification = (
+        b.pending_clarification_set if b.pending_clarification_set != _UNSET else a.pending_clarification_set
+    )
 
     return AppliedDiff(
         attr_deltas=tuple(deltas.items()),
@@ -90,6 +94,7 @@ def merge(a: AppliedDiff, b: AppliedDiff) -> AppliedDiff:
         pending_retreat_prompt_set=(
             b.pending_retreat_prompt_set if b.pending_retreat_prompt_set is not None else a.pending_retreat_prompt_set
         ),
+        pending_clarification_set=pending_clarification,
     )
 
 
@@ -128,6 +133,8 @@ def apply_agent_diff(agent: "Agent", d: AppliedDiff) -> None:
         agent.state = state_by_name(d.state_set)
     if d.pending_retreat_prompt_set is not None:
         agent.pending_retreat_prompt = d.pending_retreat_prompt_set
+    if d.pending_clarification_set != _UNSET:
+        agent.pending_clarification = d.pending_clarification_set
 
 
 _LOCATION_ATTR_FIELDS = {"qi_density", "danger_level", "condition", "discovered"}

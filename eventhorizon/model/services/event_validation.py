@@ -143,6 +143,7 @@ def validate_event_def(raw: dict, ctx: ValidationCatalog) -> tuple[GameEventDef 
         schema_version=int(raw.get("schema_version", 1)),
         is_draft=bool(raw.get("is_draft", True)),
         is_command=bool(raw.get("is_command", False)),
+        description=str(raw.get("description") or ""),
         predicate_text=str(raw.get("predicate_text") or ""),
         # predicate_embedding 由调用方（admin_controller.py）算好传进来——本函数
         # 是纯结构校验，不做任何 I/O，向量化需要真的调 EmbeddingPort。

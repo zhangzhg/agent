@@ -116,6 +116,7 @@ class EventSummaryDTO(BaseModel):
     is_command: bool
     is_draft: bool
     weight: float
+    description: str = ""
 
 
 class EventDetailDTO(BaseModel):
@@ -142,6 +143,9 @@ class EventDetailDTO(BaseModel):
     scenario_ref: str | None = None
     is_draft: bool = True
     is_command: bool = False
+    description: str = ""
+    # 给管理员看的简短说明，跟 item/location 已有的 description 是同一个定位——
+    # 事件列表/表单里的备注，不喂给玩家、不参与判定。
     predicate_text: str = ""
     # 触发条件的自然语言描述（编辑器表单用它替代 predicate JSON 输入框）——留空
     # 表示无条件；非空时后端会调 EmbeddingPort 算向量并存下来，运行时按向量相似度

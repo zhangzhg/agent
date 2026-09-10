@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from model.domain.agent import Agent, AgentEventHistory, Biography, BiographyEntry, PendingScenario
+from model.domain.agent import Agent, AgentEventHistory, Biography, BiographyEntry, PendingClarification, PendingScenario
 from model.domain.balance import DEFAULT_REALM_ORDER
 from model.domain.cause import CauseLink
 from model.domain.diff import AppliedDiff, LocationAttrChange, WorldDiff
@@ -149,6 +149,7 @@ def event_def_to_dict(e: GameEventDef) -> dict:
         "schema_version": e.schema_version,
         "is_draft": e.is_draft,
         "is_command": e.is_command,
+        "description": e.description,
         "predicate_text": e.predicate_text,
         "predicate_embedding": list(e.predicate_embedding),
         "result_text": e.result_text,
@@ -186,6 +187,7 @@ def event_def_from_dict(d: dict) -> GameEventDef:
         schema_version=d.get("schema_version", 1),
         is_draft=d.get("is_draft", False),
         is_command=d.get("is_command", False),
+        description=d.get("description", ""),
         predicate_text=d.get("predicate_text", ""),
         predicate_embedding=tuple(d.get("predicate_embedding") or ()),
         result_text=d.get("result_text", ""),
@@ -207,6 +209,17 @@ def applied_diff_to_dict(diff: AppliedDiff | None) -> dict | None:
             "current_node_id": pending_scenario.current_node_id,
             "host_event_id": pending_scenario.host_event_id,
         }
+    pending_clarification = diff.pending_clarification_set
+    if pending_clarification == "__unset__":
+        pending_clarification_json: Any = "__unset__"
+    elif pending_clarification is None:
+        pending_clarification_json = None
+    else:
+        pending_clarification_json = {
+            "original_text": pending_clarification.original_text,
+            "kind": pending_clarification.kind,
+            "attempts": pending_clarification.attempts,
+        }
     return {
         "attr_deltas": [list(x) for x in diff.attr_deltas],
         "realm_set": diff.realm_set,
@@ -223,6 +236,7 @@ def applied_diff_to_dict(diff: AppliedDiff | None) -> dict | None:
         "pending_scenario_set": pending_scenario_json,
         "state_set": diff.state_set,
         "pending_retreat_prompt_set": diff.pending_retreat_prompt_set,
+        "pending_clarification_set": pending_clarification_json,
     }
 
 
@@ -236,6 +250,13 @@ def applied_diff_from_dict(d: dict | None) -> AppliedDiff | None:
         pending_scenario = None
     else:
         pending_scenario = PendingScenario(**pending_scenario_json)
+    pending_clarification_json = d.get("pending_clarification_set", "__unset__")
+    if pending_clarification_json == "__unset__":
+        pending_clarification: Any = "__unset__"
+    elif pending_clarification_json is None:
+        pending_clarification = None
+    else:
+        pending_clarification = PendingClarification(**pending_clarification_json)
     return AppliedDiff(
         attr_deltas=tuple(tuple(x) for x in d.get("attr_deltas", ())),
         realm_set=d.get("realm_set"),
@@ -252,6 +273,7 @@ def applied_diff_from_dict(d: dict | None) -> AppliedDiff | None:
         pending_scenario_set=pending_scenario,
         state_set=d.get("state_set"),
         pending_retreat_prompt_set=d.get("pending_retreat_prompt_set"),
+        pending_clarification_set=pending_clarification,
     )
 
 
@@ -332,6 +354,13 @@ def agent_to_dict(agent: Agent) -> dict:
             "current_node_id": agent.pending_scenario.current_node_id,
             "host_event_id": agent.pending_scenario.host_event_id,
         }
+    pending_clarification = None
+    if agent.pending_clarification is not None:
+        pending_clarification = {
+            "original_text": agent.pending_clarification.original_text,
+            "kind": agent.pending_clarification.kind,
+            "attempts": agent.pending_clarification.attempts,
+        }
     history = agent.event_history
     return {
         "agent_id": agent.agent_id,
@@ -370,6 +399,7 @@ def agent_to_dict(agent: Agent) -> dict:
         "origin": agent.origin,
         "turn_count": agent.turn_count,
         "pending_retreat_prompt": agent.pending_retreat_prompt,
+        "pending_clarification": pending_clarification,
         "consecutive_breakthrough_failures": agent.consecutive_breakthrough_failures,
         "is_npc": agent.is_npc,
     }
@@ -389,6 +419,9 @@ def agent_from_dict(d: dict) -> Agent:
     pending_scenario = None
     if d.get("pending_scenario") is not None:
         pending_scenario = PendingScenario(**d["pending_scenario"])
+    pending_clarification = None
+    if d.get("pending_clarification") is not None:
+        pending_clarification = PendingClarification(**d["pending_clarification"])
 
     time_anchor_d = d["time_anchor"]
     return Agent(
@@ -421,6 +454,7 @@ def agent_from_dict(d: dict) -> Agent:
         origin=d.get("origin", ""),
         turn_count=d.get("turn_count", 0),
         pending_retreat_prompt=d.get("pending_retreat_prompt", False),
+        pending_clarification=pending_clarification,
         consecutive_breakthrough_failures=d.get("consecutive_breakthrough_failures", 0),
         is_npc=d.get("is_npc", False),
     )

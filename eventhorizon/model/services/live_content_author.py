@@ -16,43 +16,79 @@ command）都处理不了玩家这句话时，最后一层退路——调用大�
   - 这里（LiveContentAuthor）：明确会创造全新的 GameEventDef / Location / Route
     并立即生效——三者用途、风险、落库时机都不一样，改一个不要照抄另一个的假设。
 
-安全边界（不是"完全不设防"，而是"不做人工审核，但仍然过自动校验"）：
-  - 事件创作直接复用 LlmEventFlavorAuthor（同一套 result_pool 安全过滤：只剩
-    state_change，没有 item_drop/chain_event 这类会悬空引用的类型），产出仍然
-    要过 validate_event_def() 的联动校验才落库。
-  - 地点创作的 kind 必须落在 LocationKind 白名单内，不在白名单直接判失败，不猜、
-    不兜底成一个随意值。
-  - 模型判断"这句话在情节上说不通"时应该直接拒绝（返回 None），调用方保留原有
-    "听不懂"/"找不到地方"文案，不会为了凑数硬编内容。
+安全边界（不是"完全不设防"，而是"不做人工审核，但仍然过自动校验/先核实数据/
+先问清楚"）：
+  - 事件创作的 result_pool 只放开 state_change（跟 LlmEventFlavorAuthor 同一套
+    安全过滤），没有 item_drop/chain_event 这类会悬空引用的类型。
+  - 地点创作的 kind 必须落在 LocationKind 白名单内。
+  - 两种创作在动手之前都先让模型自己判断"信息够不够/说不说得通"：
+    needs_clarification（缺关键信息，追问一次——见 play_turn.py 的
+    PendingClarification 挂起态）、reject（说不通，直接拒绝）、ready（可以创作/
+    已确认是已有内容）三态，不是"要么瞎编、要么听不懂"两态。
+  - 地点创作额外带一个 list_locations 工具（真正的 function calling，见
+    model/services/llm_tool_loop.py）：模型先查一遍游戏里真实存在的地点，
+    发现玩家说的其实是已有地点的另一种措辞时直接复用，不新建近似重复的地点。
 """
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Literal, Protocol
+
+from model.services.llm_tool_loop import run_tool_loop
+from model.services.result_pool_safety import FIELD_HINT as _FIELD_HINT
+from model.services.result_pool_safety import sanitize_result_pool
 
 _logger = logging.getLogger("eventhorizon.live_content_author")
 
 
 class LlmClient(Protocol):
     def complete(self, prompt: str) -> str: ...
+    def complete_with_tools(self, messages: list[dict], tools: list[dict]) -> dict: ...
 
+
+_COMMAND_PROMPT_TEMPLATE = (
+    "你是一款文字修仙游戏的实时叙事引擎。玩家当前身处「{location_type}」，说：\n"
+    "「{player_text}」\n\n"
+    "只输出下面三种情况之一对应的 JSON，不要有任何多余文字、解释或代码块标记"
+    "（不要用 ```）：\n\n"
+    "1. 这句话缺了关键信息，没法确定具体该发生什么场景（比如说了动作但看不出"
+    "对象/方式，含糊到没法落笔）：只输出\n"
+    '{{"needs_clarification": true, "question": "一句自然的追问，帮玩家把话说清楚"}}\n\n'
+    "2. 这句话明显不构成任何合理的游戏内动作（乱敲的字符、跟修仙世界毫无关系的话、"
+    "纯粹的测试文本）：只输出\n"
+    '{{"reject": true}}\n\n'
+    "3. 这句话确实表达了一个具体、能直接构思出场景的动作意图（即使措辞不寻常）："
+    "构思一个刚好能回应这个动作的场景，只输出一个 JSON 数组，恰好 1 个元素，"
+    "形如：\n"
+    '[{{"tags": ["生活"], "aliases": [], "variants": ["第二人称叙事文案，'
+    '40-120字，古风白话文风格"], "weight": 1.0, "duration_shichen": 1, '
+    '"cooldown_shichen": 0, "priority": 5, "result_pool": [], "item_query": ""}}]\n'
+    "（这一支适用：tags 从「生活、修炼、社交、奇遇、战斗、经济」里选 1-2 个；"
+    "result_pool 只能是 state_change，field 只能从这几个里选：" + _FIELD_HINT + "，"
+    "没有实际影响就给空数组；variants 里只能用这些占位符：{{地点}} {{境界}} {{金钱}} "
+    "{{年龄}} {{天气}} {{对象}}）"
+)
 
 _LOCATION_PROMPT_TEMPLATE = (
     "你是一款文字修仙游戏的实时叙事助手。玩家当前身处「{current_name}」"
-    "（地点类型：{current_type}），说想去「{hint}」，但游戏里还没有这个地方。\n\n"
-    "请判断「{hint}」应该是：\n"
-    "1. 当前地点内部/近旁的一个子场所（比如城市里的集市、藏经阁、演武场——玩家"
-    "在城里逛逛就能到，不构成一次远行）；\n"
-    "2. 一个明显在外部的地方（比如另一座城市、门派、地域——不是靠在城里走两步"
-    "就能到的）；\n"
-    "3. 完全说不通、纯粹的胡言乱语（比如乱打的字符，或者跟地点毫无关系的话）。\n\n"
-    "只输出一个 JSON 对象，不要有任何多余文字、解释或代码块标记（不要用 ```）。\n"
-    "如果是 1 或 2，输出形如：\n"
-    '{{"name": "地点名，2-6个汉字，符合修仙世界观", "kind": "从这几个类型里选一个：'
-    '{kinds}", "is_internal": true 或 false}}\n'
-    '如果是 3，输出：{{"reject": true}}'
+    "（地点类型：{current_type}），说想去「{hint}」，但按名字/别名直接查找没找到"
+    "现成的地点。你可以调用 list_locations 工具查看游戏里当前真实存在的地点，"
+    "确认「{hint}」是不是其实就是某个已有地点的另一种说法（措辞不同但明显是同"
+    "一个地方），避免创作出一个跟已有地点撞车的近似重复地点。\n\n"
+    "确认完之后，只输出一个 JSON 对象，不要有任何多余文字、解释或代码块标记"
+    "（不要用 ```），是下面这几种之一：\n"
+    '1. 其实是已有地点（只是措辞不同）：{{"existing_location_id": "从 list_locations '
+    '结果里选一个 location_id"}}\n'
+    '2. 当前地点内部/近旁的一个新子场所（比如城市里的集市、藏经阁、演武场——玩家'
+    '在城里逛逛就能到，不构成一次远行）：{{"name": "地点名，2-6个汉字，符合修仙'
+    '世界观", "kind": "从这几个类型里选一个：{kinds}", "is_internal": true}}\n'
+    '3. 一个明显在外部的新地方（比如另一座城市、门派、地域）：跟 2 同样的字段，'
+    '"is_internal": false\n'
+    '4. 这句话本身太含糊，判断不出是找已有地点还是要去一个什么样的新地方：'
+    '{{"needs_clarification": true, "question": "一句自然的追问"}}\n'
+    '5. 完全说不通、纯粹的胡言乱语：{{"reject": true}}'
 )
 
 
@@ -64,50 +100,120 @@ class LiveLocationDecision:
     is_internal: bool
 
 
+@dataclass(frozen=True, slots=True)
+class LiveAuthorOutcome:
+    """author_command_event/author_location 共用的三态结果——ready 才是"可以
+    真的落库/生效"，needs_clarification 对应 play_turn.py 的 PendingClarification
+    挂起态（追问一次，最多 3 轮，见那边的实现），reject 走调用方原有的"听不懂"/
+    "找不到地方"兜底文案。"""
+
+    kind: Literal["ready", "needs_clarification", "reject"]
+    command_raw: dict | None = None
+    location_decision: "LiveLocationDecision | None" = None
+    existing_location_id: str | None = None
+    question: str | None = None
+
+
+def _clamp_float(value, default: float, lo: float, hi: float) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+def _clamp_int(value, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
 class LiveContentAuthor:
     def __init__(self, client: LlmClient) -> None:
         self._client = client
 
-    def author_command_event(self, player_text: str, location_type: str) -> dict | None:
-        """复用 LlmEventFlavorAuthor（跟 admin 编辑器"AI 生成事件"同一套 prompt/
-        result_pool 安全过滤），把玩家这句话当"情节描述"喂给它，只要 1 条。返回
-        的 dict 形状跟 generate_event_flavors() 单条元素一致；生成失败/模型没给出
-        任何可用 variants 都返回 None（不硬凑）。"""
-        from model.repositories.llm.llm_event_flavor_author import LlmEventFlavorAuthor
-
-        description = f"玩家在「{location_type}」说：「{player_text}」。请构思一个刚好能回应这句话的场景。"
+    def author_command_event(self, player_text: str, location_type: str) -> LiveAuthorOutcome:
+        prompt = _COMMAND_PROMPT_TEMPLATE.format(player_text=player_text, location_type=location_type)
         try:
-            flavors = LlmEventFlavorAuthor(self._client).generate_event_flavors(description, count=1)
+            raw = self._client.complete(prompt)
         except Exception as exc:
             _logger.warning("实时事件创作失败：%s", exc)
-            return None
-        return flavors[0] if flavors else None
+            return LiveAuthorOutcome(kind="reject")
+        parsed = _parse_json_value(raw)
+        if isinstance(parsed, dict):
+            if parsed.get("needs_clarification"):
+                question = str(parsed.get("question") or "").strip()
+                if question:
+                    return LiveAuthorOutcome(kind="needs_clarification", question=question)
+            return LiveAuthorOutcome(kind="reject")
+        if not isinstance(parsed, list) or not parsed:
+            return LiveAuthorOutcome(kind="reject")
+        item = parsed[0]
+        if not isinstance(item, dict):
+            return LiveAuthorOutcome(kind="reject")
+        variants = [str(v).strip() for v in item.get("variants", []) if str(v).strip()]
+        if not variants:
+            return LiveAuthorOutcome(kind="reject")
+        command_raw = {
+            "tags": [str(t).strip() for t in item.get("tags", []) if str(t).strip()],
+            "aliases": [str(a).strip() for a in item.get("aliases", []) if str(a).strip()],
+            "variants": variants,
+            "weight": _clamp_float(item.get("weight"), default=1.0, lo=0.1, hi=5.0),
+            "duration_shichen": _clamp_int(item.get("duration_shichen"), default=1, lo=0, hi=8),
+            "cooldown_shichen": _clamp_int(item.get("cooldown_shichen"), default=0, lo=0, hi=48),
+            "priority": _clamp_int(item.get("priority"), default=5, lo=1, hi=9),
+            "result_pool": sanitize_result_pool(item.get("result_pool")),
+        }
+        return LiveAuthorOutcome(kind="ready", command_raw=command_raw)
 
-    def author_location(self, hint: str, current_location_name: str, current_location_type: str) -> LiveLocationDecision | None:
+    def author_location(
+        self, hint: str, current_location_name: str, current_location_type: str,
+        list_locations: "Callable[[], list[dict]]",
+    ) -> LiveAuthorOutcome:
         from model.domain.map import LocationKind
 
         kinds = [k.value for k in LocationKind]
         prompt = _LOCATION_PROMPT_TEMPLATE.format(
             current_name=current_location_name, current_type=current_location_type, hint=hint, kinds="、".join(kinds)
         )
-        try:
-            raw = self._client.complete(prompt)
-        except Exception as exc:
-            _logger.warning("实时地点创作失败：%s", exc)
-            return None
-        item = _parse_json_object(raw)
-        if item is None or item.get("reject"):
-            return None
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "list_locations",
+                "description": "查询游戏里当前真实存在、玩家可见的地点列表",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }]
+        tool_impls = {"list_locations": lambda: list_locations()}
+        content = run_tool_loop(self._client, [{"role": "user", "content": prompt}], tools, tool_impls)
+        if content is None:
+            return LiveAuthorOutcome(kind="reject")
+        item = _parse_json_object(content)
+        if item is None:
+            return LiveAuthorOutcome(kind="reject")
+        if item.get("reject"):
+            return LiveAuthorOutcome(kind="reject")
+        if item.get("needs_clarification"):
+            question = str(item.get("question") or "").strip()
+            if question:
+                return LiveAuthorOutcome(kind="needs_clarification", question=question)
+            return LiveAuthorOutcome(kind="reject")
+        existing_id = item.get("existing_location_id")
+        if existing_id:
+            return LiveAuthorOutcome(kind="ready", existing_location_id=str(existing_id))
         name = str(item.get("name", "")).strip()
         kind = str(item.get("kind", "")).strip()
         if not name or kind not in kinds:
-            return None
-        return LiveLocationDecision(
+            return LiveAuthorOutcome(kind="reject")
+        decision = LiveLocationDecision(
             name=name, kind=kind, location_type=kind, is_internal=bool(item.get("is_internal", False))
         )
+        return LiveAuthorOutcome(kind="ready", location_decision=decision)
 
 
-def _parse_json_object(raw: str) -> dict | None:
+def _parse_json_value(raw: str):
     text = raw.strip()
     if text.startswith("```"):
         text = text.strip("`")
@@ -115,8 +221,12 @@ def _parse_json_object(raw: str) -> dict | None:
             text = text[4:]
         text = text.strip()
     try:
-        parsed = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
         _logger.warning("LLM output is not valid JSON, discarding")
         return None
+
+
+def _parse_json_object(raw: str) -> dict | None:
+    parsed = _parse_json_value(raw)
     return parsed if isinstance(parsed, dict) else None
