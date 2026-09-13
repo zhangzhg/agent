@@ -45,6 +45,14 @@ class SqliteEventRepository:
             return defs
         return [e for e in defs if location_type in e.applicable_locations or "*" in e.applicable_locations]
 
+    def published_event_ids(self) -> set[str]:
+        """只要 id 集合的场景（联动校验的 ValidationCatalog）专用——不要为了拿一
+        把 id 就 load_event_defs(None) 把整个事件库反序列化一遍。实时创作每处理一
+        句没听懂的话就要建一次 catalog，而 live_ 事件只增不减，全量反序列化的成本
+        会随对局时长线性上涨。"""
+        rows = self._conn.execute("SELECT event_id FROM event_defs WHERE is_draft = 0")
+        return {r[0] for r in rows}
+
     def save_event_def(self, event: GameEventDef) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO event_defs (event_id, is_draft, payload) VALUES (?, ?, ?)",
@@ -78,6 +86,9 @@ class InMemoryEventRepository:
         if location_type is None:
             return defs
         return [e for e in defs if location_type in e.applicable_locations or "*" in e.applicable_locations]
+
+    def published_event_ids(self) -> set[str]:
+        return {e.event_id for e in self._events.values() if not e.is_draft}
 
     def save_event_def(self, event: GameEventDef) -> None:
         self._events[event.event_id] = event

@@ -1,6 +1,8 @@
 import unittest
 from dataclasses import replace
 
+from model.domain.agent import PendingLiveResult
+from model.domain.diff import AppliedDiff, apply_agent_diff
 from model.domain.events import EventVariant, GameEventDef, GameEventOccurrence, ReplyOption, TriggerSource
 from model.domain.predicates import Predicate, PredicateGroup, PredicateType
 from model.domain.results import ItemDrop, StateChange
@@ -445,6 +447,48 @@ class CommandIntentFallbackTests(unittest.TestCase):
         self.assertEqual(len(events.load_event_defs(None)), 0)
 
 
+class TerminalFallbackTests(unittest.TestCase):
+    """优化策略.md 的终极兜底：规则解析/向量意图/实时创作全部落空时，第 4 轮起
+    不再回落"听不懂"，而是执行预置的 idle_wander 事件——玩家的话被"听懂"了，
+    只是什么都没发生，还消耗了一点时间，跟被系统拒绝观感完全不同。"""
+
+    def _idle_wander_def(self):
+        return _command(event_id="idle_wander", aliases=("闲逛",), result_pool=())
+
+    def test_turn_over_three_with_no_match_executes_idle_wander_not_parse_failed(self):
+        events = InMemoryEventRepository({"idle_wander": self._idle_wander_def()})
+        play_turn = make_play_turn(events)
+        agent = make_agent(turn_count=4)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "今天天气怎么样")
+
+        self.assertIsNone(result.parse_error)
+        self.assertEqual(result.command_event_id, "idle_wander")
+
+    def test_turn_within_first_three_still_gets_soft_guidance_not_idle_wander(self):
+        """GAME_DESIGN §1.1 前 3 轮的引导提示不该被终极兜底顶替掉。"""
+        events = InMemoryEventRepository({"idle_wander": self._idle_wander_def(), "eat": _command()})
+        play_turn = make_play_turn(events)
+        agent = make_agent(turn_count=1)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "今天天气怎么样")
+
+        self.assertIsNotNone(result.parse_error)
+
+    def test_missing_idle_wander_def_falls_back_to_parse_failed_defensively(self):
+        """预置事件理论上总是存在，但万一没 seed 上，别让玩家卡死或报错。"""
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events)
+        agent = make_agent(turn_count=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "今天天气怎么样")
+
+        self.assertIsNotNone(result.parse_error)
+
+
 class LooksLikeGibberishTests(unittest.TestCase):
     def test_pure_ascii_is_gibberish(self):
         self.assertTrue(_looks_like_gibberish("asdkjhaskjdh"))
@@ -587,6 +631,210 @@ class PendingClarificationTests(unittest.TestCase):
         self.assertIsNotNone(r4.parse_error)  # 回落原有"听不懂"文案
         self.assertEqual(client.calls, 4)
         self.assertEqual(len(events.load_event_defs(None)), 0)  # 没有落库任何半成品
+
+
+class PendingLiveResultTests(unittest.TestCase):
+    """LiveContentAuthor 创作的事件可能留一个"当下还没兑现"的另一面影响
+    （deferred_result_pool）——先记事件 id + 待触发结果，等下一轮判断"故事线是否
+    收尾"才落地；悬着的这段时间不该再抽新的第二段奇遇（见 model/domain/agent.py::
+    PendingLiveResult 类注释）。"""
+
+    _RESPONSE_WITH_DEFERRED = (
+        '[{"tags": ["社交"], "aliases": [], "variants": ["你帮邻居家老太太挑了'
+        '两桶水，老人家连声道谢。"], "weight": 1.0, "duration_shichen": 1, '
+        '"cooldown_shichen": 0, "priority": 5, '
+        '"result_pool": [{"kind": "state_change", "field": "money", "delta": 3}], '
+        '"deferred_result_pool": [{"kind": "state_change", "field": "heart_demon", "delta": -0.02}], '
+        '"item_query": ""}]'
+    )
+
+    def test_deferred_result_sets_pending_state_not_applied_immediately(self):
+        client = _FakeLiveClient(self._RESPONSE_WITH_DEFERRED)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, heart_demon=0.0)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "帮邻居家老太太挑两桶水")
+
+        self.assertIsNone(result.parse_error)
+        self.assertEqual(agent.money, 13)  # 即时 result_pool 已生效
+        self.assertEqual(agent.heart_demon, 0.0)  # 延迟结果还没生效
+        self.assertIsNotNone(agent.pending_live_result)
+        self.assertEqual(agent.pending_live_result.event_id, result.command_event_id)
+        self.assertEqual(
+            agent.pending_live_result.deferred_result_pool,
+            ({"kind": "state_change", "field": "heart_demon", "delta": -0.02},),
+        )
+
+    def test_next_turn_concluding_applies_deferred_result_and_clears_pending(self):
+        client = _SequencedFakeLiveClient([self._RESPONSE_WITH_DEFERRED, '{"concluded": true}'])
+        events = InMemoryEventRepository({"eat": _command()})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, heart_demon=0.0)
+        world = make_tavern_world()
+
+        play_turn.handle_player_text(agent, world, "帮邻居家老太太挑两桶水")
+        self.assertIsNotNone(agent.pending_live_result)
+
+        play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertIsNone(agent.pending_live_result)
+        self.assertAlmostEqual(agent.heart_demon, -0.02)
+
+    def test_not_concluded_keeps_pending_and_raw_still_dispatches_normally(self):
+        client = _SequencedFakeLiveClient([self._RESPONSE_WITH_DEFERRED, '{"concluded": false}'])
+        events = InMemoryEventRepository({"eat": _command()})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, heart_demon=0.0)
+        world = make_tavern_world()
+
+        play_turn.handle_player_text(agent, world, "帮邻居家老太太挑两桶水")
+        result = play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertIsNotNone(agent.pending_live_result)  # 还没收尾，继续悬着
+        self.assertEqual(agent.heart_demon, 0.0)  # 延迟结果还没落地
+        self.assertEqual(result.command_event_id, "eat")  # 这句话本身照常正常解析
+
+    def test_max_wait_turns_forces_deferred_result_even_if_never_concluded(self):
+        responses = [self._RESPONSE_WITH_DEFERRED] + ['{"concluded": false}'] * 4
+        client = _SequencedFakeLiveClient(responses)
+        events = InMemoryEventRepository({"eat": _command()})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10, heart_demon=0.0)
+        world = make_tavern_world()
+
+        play_turn.handle_player_text(agent, world, "帮邻居家老太太挑两桶水")
+        for _ in range(4):
+            play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertIsNone(agent.pending_live_result)  # 问满上限，强制落地
+        self.assertAlmostEqual(agent.heart_demon, -0.02)
+
+    def test_no_narrative_writer_configured_forces_deferred_result_after_max_wait(self):
+        """没配大模型时没法判断"是否收尾"——不能因此永远悬着，也要走满上限强制
+        落地这条路，跟"配了但一直判断没收尾"殊途同归。"""
+        events = InMemoryEventRepository({"eat": _command()})
+        play_turn = make_play_turn(events)  # narrative_writer=None
+        agent = make_agent(money=10, heart_demon=0.0)
+        apply_agent_diff(agent, AppliedDiff(pending_live_result_set=PendingLiveResult(
+            event_id="live_prev",
+            deferred_result_pool=({"kind": "state_change", "field": "heart_demon", "delta": -0.02},),
+            narrative_hint="之前的伏笔",
+        )))
+        world = make_tavern_world()
+
+        for _ in range(4):
+            play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertIsNone(agent.pending_live_result)
+        self.assertAlmostEqual(agent.heart_demon, -0.02)
+
+    def test_second_stage_encounter_fires_normally_without_pending_live_result(self):
+        events = InMemoryEventRepository({"eat": _command(), "fish": _encounter()})
+        play_turn = make_play_turn(events)
+        agent = make_agent(money=10, location_id="jiuguan", location_type="酒楼")
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertEqual(result.encounter_event_id, "fish")
+
+    def test_second_stage_encounter_blocked_while_pending_live_result(self):
+        events = InMemoryEventRepository({"eat": _command(), "fish": _encounter()})
+        play_turn = make_play_turn(events)
+        agent = make_agent(money=10, location_id="jiuguan", location_type="酒楼")
+        apply_agent_diff(agent, AppliedDiff(pending_live_result_set=PendingLiveResult(
+            event_id="live_prev",
+            deferred_result_pool=({"kind": "state_change", "field": "money", "delta": 1},),
+            narrative_hint="之前的伏笔",
+        )))
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertIsNone(result.encounter_event_id)
+
+
+class LiveAuthoredBranchingTests(unittest.TestCase):
+    """LiveContentAuthor 创作的事件可以带 reply_options 分支——先叙述、不结算，
+    等玩家下一句选了哪个分支才落地对应的结果，跟库内既有 needs_reply 奇遇复用
+    同一套挂起机制（execute_occurrence 里的 needs_reply 分支 + 既有的
+    pending_encounter_id/_resolve_reply_option）。"""
+
+    _RESPONSE_WITH_BRANCHES = (
+        '[{"tags": ["经济"], "aliases": [], '
+        '"variants": ["你在集市看到有人卖百年人参，标价不菲。"], '
+        '"weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, "priority": 5, '
+        '"result_pool": [], "reply_options": ['
+        '{"aliases": ["买", "买下来"], "response_text": "你付了钱，把人参收好。", '
+        '"results": [{"kind": "item_drop", "item_id": "百年人参", "n": 1}, '
+        '{"kind": "state_change", "field": "money", "delta": -50}]}, '
+        '{"aliases": ["算了", "不买"], "response_text": "你看了一眼，摇摇头走开了。", '
+        '"results": []}'
+        '], "item_query": ""}]'
+    )
+
+    def test_branching_command_parks_without_applying_any_result(self):
+        client = _FakeLiveClient(self._RESPONSE_WITH_BRANCHES)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=100)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "我在集市看到有人卖百年人参")
+
+        self.assertIsNotNone(result.prompt_event_id)
+        self.assertEqual(agent.pending_encounter_id, result.prompt_event_id)
+        self.assertEqual(agent.state.name, "encounter_pending")
+        self.assertEqual(agent.money, 100)  # 还没结算
+        self.assertFalse(agent.inventory.has("百年人参"))
+        self.assertIsNone(result.encounter_event_id)  # 挂起时不该再抽第二段
+
+    def test_choosing_a_branch_applies_that_branchs_results(self):
+        client = _FakeLiveClient(self._RESPONSE_WITH_BRANCHES)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=100)
+        world = make_tavern_world()
+
+        play_turn.handle_player_text(agent, world, "我在集市看到有人卖百年人参")
+        result = play_turn.handle_player_text(agent, world, "买下来")
+
+        self.assertTrue(agent.inventory.has("百年人参"))
+        self.assertEqual(agent.money, 50)
+        self.assertIsNone(agent.pending_encounter_id)
+        self.assertEqual(agent.state.name, "idle")
+        self.assertEqual(result.freeform_narrative, "你付了钱，把人参收好。")
+
+    def test_choosing_the_other_branch_applies_no_effect(self):
+        client = _FakeLiveClient(self._RESPONSE_WITH_BRANCHES)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=100)
+        world = make_tavern_world()
+
+        play_turn.handle_player_text(agent, world, "我在集市看到有人卖百年人参")
+        play_turn.handle_player_text(agent, world, "算了")
+
+        self.assertFalse(agent.inventory.has("百年人参"))
+        self.assertEqual(agent.money, 100)
+        self.assertIsNone(agent.pending_encounter_id)
+
+    def test_unrelated_reply_abandons_pending_branch(self):
+        """跟既有奇遇挂起态一致的"错过"语义——玩家说了无关的话，挂起项按错过
+        丢弃，不强行套某个分支，也不该卡死后续输入。"""
+        events = InMemoryEventRepository({"eat": _command()})
+        client = _FakeLiveClient(self._RESPONSE_WITH_BRANCHES)
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=100)
+        world = make_tavern_world()
+
+        play_turn.handle_player_text(agent, world, "我在集市看到有人卖百年人参")
+        result = play_turn.handle_player_text(agent, world, "吃饭")
+
+        self.assertIsNone(agent.pending_encounter_id)
+        self.assertFalse(agent.inventory.has("百年人参"))
 
 
 class ChainDeliveryOrderTests(unittest.TestCase):

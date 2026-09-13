@@ -38,6 +38,27 @@ class PendingClarification:
     attempts: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class PendingLiveResult:
+    """LiveContentAuthor 实时创作的事件里，被判断"这个动作还有后续影响、当下
+    不能兑现"的那部分结果（比如"这次帮了忙得了赏钱，但也把仇家惹恼了，日后必
+    来寻仇"里的后半句）——先不落地，记下触发它的事件 id、攒着的待触发结果、
+    以及事件本身的叙事提示（供下一轮判断"这段故事线是否已经收尾"时当上下文用）。
+    deferred_result_pool 是跟 live_content_author.py::sanitize_result_pool 同一种
+    "扁平字典"形状（{"kind": "state_change", "field":..., "delta":...}），不是
+    domain 层的 Result 对象——应用时直接拆成 AppliedDiff.attr_deltas，不需要完整
+    的 pipeline/ResultPoolExecutor（跟安全过滤只放行 state_change 这一限制一致）。
+    attempts 是"已经问过几轮玩家是否翻篇了"，问满上限还没个结果就强制落地
+    （见 play_turn.py::_maybe_conclude_live_result），不会让一个伏笔永远悬着、
+    把"未结束不能抽下一个奇遇"的限制锁死。跟 PendingScenario/PendingClarification
+    同类，存在 Agent 上才能进快照。"""
+
+    event_id: str
+    deferred_result_pool: tuple  # tuple[dict, ...]
+    narrative_hint: str
+    attempts: int = 0
+
+
 @dataclass(slots=True)
 class BiographyEntry:
     at: GameTime
@@ -220,6 +241,7 @@ class Agent:
     turn_count: int = 0  # 已处理的玩家输入轮数；驱动"提示只出现在前 3 轮"（§1.1）
     pending_retreat_prompt: bool = False  # 已说"闭关"，等待"闭关多久"的回答（§4.3）
     pending_clarification: PendingClarification | None = None  # LiveContentAuthor 追问补全
+    pending_live_result: PendingLiveResult | None = None  # LiveContentAuthor 留下的延迟结果，见类注释
     consecutive_breakthrough_failures: int = 0  # 连续突破失败次数，达阈值触发走火入魔（§7.2）
 
     # —— NPC 标记（README 1.5.2 日程系统用它筛选"谁该被日程巡检"）——

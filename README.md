@@ -222,8 +222,143 @@
 真实存在的地点，判断玩家说的其实是不是已有地点的另一种措辞，避免创作出撞名的
 近似重复地点；(2) 命令/地点创作都会先判断玩家这句话信息够不够，不够就走
 `PendingClarification` 挂起态追问一句（最多真的问出 3 次，问满还是不够就放弃，
-清挂起态、回落原有的"听不懂"/"找不到地方"文案），不再是"要么瞎编、要么听不懂"
+清挂起态、回落 1.13 节的兜底文案/"找不到地方"），不再是"要么瞎编、要么听不懂"
 两态。仍然是"不经草稿审核、立即生效"，例外范围没有扩大，只是决策前更谨慎。
+
+`PendingClarification`（`model/domain/agent.py`）跟 `PendingScenario` 是同一类
+东西：**挂在 Agent 上、要进快照**（`original_text` 是玩家最初那句话，追问回来的
+话会拼在它后面重新尝试创作；`attempts` 记已经问出去几次）。它同样要参与
+`AppliedDiff` 合并（`pending_clarification_set`）和 codec 序列化——漏掉任何一处
+都是"读档静默丢挂起态"。目前 Agent 上共有 5 个挂起态字段，新增一个的成本和风险
+见 [优化建议.md](优化建议.md) P1-2。
+
+### 1.13 输入解析兜底链与终极兜底
+玩家聊天框里能打出任何话，`PlayTurnService.handle_player_text` 按下面这条链依次
+尝试，前一层没接住才落到下一层（见 `优化策略.md` 的"三层+终极兜底"设计原则：
+**不要拒绝，要"理解并转化"，即使转化结果是"无意义的消耗"**）：
+
+1.  **`ChatParser.parse`**——别名精确/子串匹配（"吃饭"→`eat`）。
+2.  **向量意图兜底**（`matching.py::find_best_matching_command`）——跟当前地点
+    已发布命令型事件的 `narrative_embedding` 比语义相似度，接住"我想吃点东西"
+    这类换了说法但意思明确的输入。
+3.  **`LiveContentAuthor` 实时创作**（1.12 节例外）——前两层都判断不了时，实时
+    调大模型把这句话创作成一个新命令型事件，必要时先 `PendingClarification`
+    追问一句。
+4.  **终极兜底：`idle_wander`**（`content/events/commands.py`，`play_turn.py::
+    _idle_wander_fallback`）——前三层全部落空（或大模型判定 `reject`、或追问
+    满 3 次还是不够）时，**绝不再让玩家看到干瘪的"听不懂"**，而是直接执行这个
+    预置的命令型事件：给一段"什么都没发生，但话确实被听懂了"的旁白，并按其
+    `duration_shichen` 消耗一点游戏时间。它本身也是个普通的、带别名的命令型
+    事件，"到处走走看"这类含糊输入往往在第 2 层向量兜底就已经自然命中它，不需
+    要专门的关键词特判——第 4 层只是兜住连向量都够不着的极端情况（完全不相关
+    的话题、大模型不可用等）。
+
+GAME_DESIGN §1.1 的"前 3 轮软性引导"（`_soft_guidance_message`，举当前地点的
+命令别名当例子）不受这条链影响：第 1-3 轮走到终极兜底时仍然显示引导文案，
+只有第 4 轮起才会执行 `idle_wander` 而不是显示提示语——避免新手引导被"什么都
+没发生"的旁白盖过去。
+
+### 1.14 世界信息问答（"我在哪里""附近有哪些城市"）
+玩家问的不全是"要做什么"，也有"现在是什么情况"这类元问题——直接把这类输入丢进
+1.13 节那条命令解析链会很奇怪（`LiveContentAuthor` 会试图把"我在哪里"编成一个
+待创作的场景）。这类问题走一条独立的只读路径，跟 `inspect_npc`/`scan` 一样由
+`ChatController.on_player_message` 在两段式循环之外直接处理，不改状态、不消耗
+回合、不进 `AgentEventHistory`：
+
+1.  **关键词粗筛**（`world_query_assistant.py::looks_like_info_question`）——命中
+    "我在哪"/"最近的城市"/"我是什么境界" 这类关键词才值得往下走，省掉绝大多数
+    正常游戏指令上多余的一次大模型请求。
+2.  **`WorldQueryAssistant`**——真正的 function calling（`llm_tool_loop.py` +
+    `game_context_tools.py` 公共工具集：`get_player_status`/`get_current_location`/
+    `list_all_locations`/`list_reachable_locations`），先调工具拿到真实数据再作答，
+    不许凭空编地名/数值。模型判断这句话其实不是在问信息（或者调用失败/没配置
+    大模型）时输出 `{"not_info_query": true}`，`answer()` 返回 `None`。
+
+`ChatController` 拿到 `None` 时**原样回落到 1.13 节的正常命令解析链**，当作
+关键词粗筛没命中过一样——绝不能因为猜错了就把一句正常的游戏指令截胡。这几个
+工具是公共的：以后别的实时创作 prompt（比如 `LiveContentAuthor`）想先摸清玩家
+现状，也可以直接复用，不用各自重新发明一份读数据的逻辑。
+
+### 1.15 实时创作事件的延迟结果（"当下还没兑现"的另一面影响）
+`LiveContentAuthor` 创作的事件不止有"立刻生效"的 `result_pool`，有时一个动作
+明显还留了一个当下不该兑现、要等故事线自己收尾才会真正发生的另一面影响——
+比如"当众羞辱了城主的儿子，对方扬言日后报复"：即时效果是"心魔略升"，但"日后
+报复"这部分不该这一轮就生效，得等玩家的故事线翻篇。
+
+- **`deferred_result_pool`**（`live_content_author.py`）——`author_command_event`
+  的 prompt 在必填的 `result_pool` 之外，新增一个可选字段，形状/安全限制
+  （只放行 `state_change`、field 白名单）跟 `result_pool` 完全一样；大多数动作
+  没有这种延后影响，留空是正常情况，不像 `result_pool` 那样有默认值兜底。
+- **`PendingLiveResult`**（`model/domain/agent.py`）——非空时记到 Agent 挂起态上：
+  触发它的事件 id、攒着待触发的 `deferred_result_pool`、事件本身的叙事提示。
+  跟 `PendingScenario`/`PendingClarification` 同类，进快照、参与 `AppliedDiff`
+  合并（`pending_live_result_set`）。
+- **收尾判断**（`play_turn.py::_maybe_conclude_live_result`，每轮调用一次）——
+  玩家下一句话先经 `LiveContentAuthor.check_storyline_concluded(narrative_hint,
+  raw)` 判断"这段伏笔算不算翻篇了"（宽松认定：换话题、明确说不想管了都算）；
+  判断"是"就把攒着的 `deferred_result_pool` 一次性拆成 `attr_deltas` 落地、清
+  挂起态；判断"否"就继续挂着、`attempts+1`；连问满 `_LIVE_RESULT_MAX_WAIT_TURNS`
+  （3）轮都没个结果（含没配大模型没法判断的情况），也强制落地——不能让一个
+  伏笔永远悬着。这一步是纯副作用，不吃掉玩家这句话本身，正常的命令解析照常
+  进行。
+- **连贯性约束**（`execute_occurrence`）——`pending_live_result` 非空时，本轮
+  即使命中了命令型事件，也不再抽取第二段随机奇遇（`_second_stage`）——避免一条
+  伏笔还悬着，又平白冒出一个不相关的新奇遇。命令本身的谓词校验、状态转换、
+  即时 `result_pool` 结算都不受影响，只是不叠加随机奇遇。
+
+这套机制只作用于 `LiveContentAuthor` 实时创作的事件——`content/events/*.py`
+里手工录入的内置命令（吃饭/打坐等）不涉及，仍然是即时结算、即时可抽第二段。
+
+### 1.16 实时创作事件的分支结果（"要不要买下这株人参"）
+有些实时创作的场景，结果本身取决于玩家接下来的选择——不是"发生了就有个固定
+结果"，而是"发生了，然后看你怎么选"。这类场景不该直接给 `result_pool`，而是
+带一组分支（`reply_options`），先叙述、不结算，等玩家下一句选了哪个分支才落地
+对应的结果，跟事件库里手工录入的 `needs_reply` 奇遇（如"看到金龙鱼"）复用
+**完全同一套**挂起机制，没有另起一条新路：
+
+- **`reply_options`**（`live_content_author.py::author_command_event` 的可选
+  字段）——每个分支包含 `aliases`（玩家大概会怎么说，2-4 个短语）、
+  `response_text`（选中后的应答文案）、`results`（跟 `result_pool` 一样的结构，
+  额外多放开一种 `item_drop`：`{"kind": "item_drop", "item_id": "物品的中文
+  名称", "n": 数量}`——`item_id` 不要求是游戏里已登记的物品，这次对局临时创作
+  的产物本来就不经草稿审核，`Inventory`（`model/domain/items.py`）只是个
+  `dict[item_id, count]`，背包面板没有对应 `ItemDef` 时会直接拿 `item_id` 本身
+  当显示名（`view/inventory_panel_view.py`），只要是可读的中文名字，玩家看到
+  的就是正常物品名）。至少要有 2 个合法分支才算数，1 个分支等于没得选，会退化
+  成走普通的 `result_pool`。用了分支，宿主事件自己的 `result_pool`/
+  `deferred_result_pool` 永远不会被用到，直接强制清空。
+- **落地**（`execute_occurrence`）——`defn.needs_reply` 为真时（`reply_options`
+  非空即真），`try_transition` 校验完状态合法性之后，不跑责任链，直接
+  `_park_encounter` 挂起、`agent.state.settle()` 转成 `encounter_pending`，
+  返回只带叙事提示的 `TurnResult`（`with_prompt`）。时间推进、事件历史记录都
+  留到玩家真正选中某个分支时才发生——跟库内既有 `_resolve_reply_option` 的
+  行为完全一致，没有为这条新路径单独发明一套时间语义。
+- **选择分支**：玩家下一句话经既有的 `pending_encounter_id` 优先级、
+  `ChatParser.parse_reply` 按分支 `aliases` 做子串匹配，`_resolve_reply_option`
+  跑选中分支的 `results`。玩家说了跟任何分支都不沾边的话，按"错过"丢弃挂起项
+  （跟其他 `needs_reply` 事件同一套既有行为，不特殊处理）。
+
+**安全加固**（这次顺带修的两个真问题，不止服务于分支结果）：
+- **数值 clamp**（`result_pool_safety.py::_DELTA_CLAMP_RANGE`）——`FIELD_HINT`
+  给模型的"常见范围"提示以前只是文字建议，从没在代码里真正强制过；实测
+  glm-4-flash 给"买一株百年人参"这类场景时给出过 `money delta -200`，远超
+  提示的 -20~30。现在 `sanitize_result_pool`/`sanitize_branch_results` 都会把
+  超界的 delta clamp 到"常见范围"2 倍的硬上限，而不是丢弃整条——clamp 保留了
+  "这次变化比较大"的方向，丢弃则会导致"发生了"却"什么都没变"。
+- **示例占位符防护**（`live_content_author.py::_EXAMPLE_VARIANT_PLACEHOLDER`）
+  ——实测偶尔会把 prompt 里 JSON 形状示例的占位描述文字（"第二人称叙事文案，
+  40-120字，古风白话文风格"）原样当成自己的 `variants` 输出，而不是替换成真正
+  的场景文案。这种半成品文本绝不能发给玩家，命中就整条拒绝，回落到 1.13 节的
+  兜底链下一层。
+
+**已知模型局限（live-tested，非代码 bug）**：`glm-4-flash` 对 `reply_options`
+这个可选字段的采用率很低——哪怕输入就是 prompt 示例本身的"看到有人卖百年人参"
+场景，连续多次尝试也几乎不会真的给出分支，通常直接给一个立即生效的
+`result_pool`。分支*机制*本身已经过完整的单测覆盖（`LiveContentAuthor`/
+`PlayTurnService` 两侧、含真实 GLM 账号的端到端验证），是可用、正确的能力；
+只是这个模型不太会主动判断"这里该给玩家一个选择"，倾向于替玩家直接做决定——
+跟 `PendingClarification`/`deferred_result_pool` 已经确认过的"模型不太用可选/
+细分字段"是同一种倾向，不是新问题，值得在换用更强模型时重新评估。
 ---
 ## 第二部分：游戏设计
 ### 2.1 游戏概述

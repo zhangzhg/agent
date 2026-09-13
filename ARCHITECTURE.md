@@ -1,5 +1,34 @@
 # EventHorizon 核心底座详细设计文档（Python 实现）
 
+> ## ⚠️ 本文是**实现前的原始设计存档**，不是当前实现的准确描述
+>
+> 文中的代码清单（dataclass 字段、函数签名）写于动工之前，此后代码走了很远，
+> 这些清单**已经和源码脱节**，照着它写代码会写错。判断"现在到底是什么样"时：
+>
+> | 想知道什么 | 看哪里 |
+> |---|---|
+> | 某个类/字段现在长什么样 | **源码**（唯一权威） |
+> | 某个子系统为什么这样设计、边界在哪 | **[README.md](README.md) 第一部分** |
+> | 当初为什么选这个架构、否决了什么方案 | **本文**（这部分仍然有效，且不会腐烂） |
+> | 已知的架构/代码问题和改进计划 | **[优化建议.md](优化建议.md)** |
+>
+> **已知脱节清单**（截至 2026-09-13，非穷举）：
+>
+> - §3.3.3 的 `Agent` 只列了 3 个可选字段，实际有 12 个以上（先天属性
+>   `spirit_root`/`aptitude`/`luck`/`insight`/`origin`、`turn_count`、
+>   `consecutive_breakthrough_failures`、`is_npc`，以及下面这一串挂起态）。
+> - **挂起态**从 1 种（`pending_scenario`）长到了 5 种，另有
+>   `pending_encounter_id`、`pending_retreat_prompt`、`pending_clarification`
+>   （LiveContentAuthor 追问补全）、`pending_live_result`（延迟结果）。
+> - 本文完全没有的子系统，全部只在 README §1.12～§1.16 有说明：
+>   `LiveContentAuthor`（对局中实时创作事件/地点，README §1.12 记录在案的
+>   "对局隔离"例外）、四层输入兜底链与 `idle_wander` 终极兜底、
+>   `WorldQueryAssistant` + `game_context_tools`（世界信息问答）、
+>   `llm_tool_loop`（function calling）、`deferred_result_pool`（延迟结果）、
+>   实时创作事件的 `reply_options` 分支。
+>
+> 本文余下内容一概保持原样，**当历史设计意图读，不当接口文档读**。
+
 本文档是 [README.md](README.md) 第一部分（底座设计）与第三部分（技术方案）的落地实现设计，只覆盖**核心底座**（事件驱动引擎本身），不含前端/编辑器 UI 的界面实现。目标读者是负责用 Python 实现该引擎的开发者。
 
 **技术前提**：Python 3.11+；全量类型标注；`dataclasses` + `typing.Protocol` + `enum` 构建贫血模型；持久化用标准库 `sqlite3`（不引入 ORM 全量映射，保持结构透明、便于 Event Sourcing 重放）。

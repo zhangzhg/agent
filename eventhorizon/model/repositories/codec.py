@@ -7,9 +7,18 @@
 """
 from __future__ import annotations
 
+from dataclasses import fields as dc_fields
 from typing import Any
 
-from model.domain.agent import Agent, AgentEventHistory, Biography, BiographyEntry, PendingClarification, PendingScenario
+from model.domain.agent import (
+    Agent,
+    AgentEventHistory,
+    Biography,
+    BiographyEntry,
+    PendingClarification,
+    PendingLiveResult,
+    PendingScenario,
+)
 from model.domain.balance import DEFAULT_REALM_ORDER
 from model.domain.cause import CauseLink
 from model.domain.diff import AppliedDiff, LocationAttrChange, WorldDiff
@@ -195,31 +204,55 @@ def event_def_from_dict(d: dict) -> GameEventDef:
     )
 
 
+# ---------- 挂起态（PendingScenario / PendingClarification / PendingLiveResult）----------
+#
+# 这三个挂起态的序列化以前是三份逐字段手抄的样板，`AppliedDiff` 和 `Agent` 两侧
+# 各抄一遍，一共六处。问题不在啰嗦，在于**漏抄一处的后果是"读档静默丢挂起态"**，
+# 没有任何报错——本文件顶部注释写着"读档丢一个都会露馅"，但结构上完全依赖人不
+# 忘记。现在统一走下面两个函数，字段表直接取自 dataclass 本身
+# （`dataclasses.fields`），新增挂起态字段不用改这里，也就不存在"忘了同步"。
+#
+# `__unset__` 哨兵的语义见 domain/diff.py：`AppliedDiff` 上的挂起态字段有三态——
+# "__unset__"（本次 diff 没涉及）/ None（显式清空）/ 对象（设置成这个值）。
+# `Agent` 上没有第三态，只有 None / 对象，所以 agent 侧走的是 _pending_to_json
+# 的 None 分支，天然兼容。
+_UNSET = "__unset__"
+
+# 反序列化时需要还原成 tuple 的字段（JSON 里一律是 list）。dataclass 是 frozen 的，
+# 拿 list 塞进去虽然不会当场报错，但会破坏可哈希性、也跟运行时构造出来的实例不等价。
+_PENDING_TUPLE_FIELDS = {"deferred_result_pool"}
+
+
+def _pending_to_json(value: Any) -> Any:
+    """挂起态 → JSON。哨兵和 None 原样透传，对象按 dataclass 字段自动展开。"""
+    if value == _UNSET or value is None:
+        return value
+    return {
+        f.name: list(getattr(value, f.name)) if f.name in _PENDING_TUPLE_FIELDS else getattr(value, f.name)
+        for f in dc_fields(value)
+    }
+
+
+def _pending_from_json(raw: Any, cls: type) -> Any:
+    """JSON → 挂起态。缺字段用 dataclass 自己的默认值补，多余字段忽略——旧存档
+    在新增字段之后仍然读得回来，不会因为少一个键就整个炸掉。"""
+    if raw == _UNSET or raw is None:
+        return raw
+    known = {f.name for f in dc_fields(cls)}
+    kwargs = {
+        k: tuple(v) if k in _PENDING_TUPLE_FIELDS else v
+        for k, v in raw.items()
+        if k in known
+    }
+    return cls(**kwargs)
+
+
 def applied_diff_to_dict(diff: AppliedDiff | None) -> dict | None:
     if diff is None:
         return None
-    pending_scenario = diff.pending_scenario_set
-    if pending_scenario == "__unset__":
-        pending_scenario_json: Any = "__unset__"
-    elif pending_scenario is None:
-        pending_scenario_json = None
-    else:
-        pending_scenario_json = {
-            "scenario_id": pending_scenario.scenario_id,
-            "current_node_id": pending_scenario.current_node_id,
-            "host_event_id": pending_scenario.host_event_id,
-        }
-    pending_clarification = diff.pending_clarification_set
-    if pending_clarification == "__unset__":
-        pending_clarification_json: Any = "__unset__"
-    elif pending_clarification is None:
-        pending_clarification_json = None
-    else:
-        pending_clarification_json = {
-            "original_text": pending_clarification.original_text,
-            "kind": pending_clarification.kind,
-            "attempts": pending_clarification.attempts,
-        }
+    pending_scenario_json = _pending_to_json(diff.pending_scenario_set)
+    pending_clarification_json = _pending_to_json(diff.pending_clarification_set)
+    pending_live_result_json = _pending_to_json(diff.pending_live_result_set)
     return {
         "attr_deltas": [list(x) for x in diff.attr_deltas],
         "realm_set": diff.realm_set,
@@ -237,26 +270,16 @@ def applied_diff_to_dict(diff: AppliedDiff | None) -> dict | None:
         "state_set": diff.state_set,
         "pending_retreat_prompt_set": diff.pending_retreat_prompt_set,
         "pending_clarification_set": pending_clarification_json,
+        "pending_live_result_set": pending_live_result_json,
     }
 
 
 def applied_diff_from_dict(d: dict | None) -> AppliedDiff | None:
     if d is None:
         return None
-    pending_scenario_json = d.get("pending_scenario_set", "__unset__")
-    if pending_scenario_json == "__unset__":
-        pending_scenario: Any = "__unset__"
-    elif pending_scenario_json is None:
-        pending_scenario = None
-    else:
-        pending_scenario = PendingScenario(**pending_scenario_json)
-    pending_clarification_json = d.get("pending_clarification_set", "__unset__")
-    if pending_clarification_json == "__unset__":
-        pending_clarification: Any = "__unset__"
-    elif pending_clarification_json is None:
-        pending_clarification = None
-    else:
-        pending_clarification = PendingClarification(**pending_clarification_json)
+    pending_scenario = _pending_from_json(d.get("pending_scenario_set", _UNSET), PendingScenario)
+    pending_clarification = _pending_from_json(d.get("pending_clarification_set", _UNSET), PendingClarification)
+    pending_live_result = _pending_from_json(d.get("pending_live_result_set", _UNSET), PendingLiveResult)
     return AppliedDiff(
         attr_deltas=tuple(tuple(x) for x in d.get("attr_deltas", ())),
         realm_set=d.get("realm_set"),
@@ -274,6 +297,7 @@ def applied_diff_from_dict(d: dict | None) -> AppliedDiff | None:
         state_set=d.get("state_set"),
         pending_retreat_prompt_set=d.get("pending_retreat_prompt_set"),
         pending_clarification_set=pending_clarification,
+        pending_live_result_set=pending_live_result,
     )
 
 
@@ -347,20 +371,9 @@ def occurrence_from_dict(d: dict) -> GameEventOccurrence:
 
 
 def agent_to_dict(agent: Agent) -> dict:
-    pending_scenario = None
-    if agent.pending_scenario is not None:
-        pending_scenario = {
-            "scenario_id": agent.pending_scenario.scenario_id,
-            "current_node_id": agent.pending_scenario.current_node_id,
-            "host_event_id": agent.pending_scenario.host_event_id,
-        }
-    pending_clarification = None
-    if agent.pending_clarification is not None:
-        pending_clarification = {
-            "original_text": agent.pending_clarification.original_text,
-            "kind": agent.pending_clarification.kind,
-            "attempts": agent.pending_clarification.attempts,
-        }
+    pending_scenario = _pending_to_json(agent.pending_scenario)
+    pending_clarification = _pending_to_json(agent.pending_clarification)
+    pending_live_result = _pending_to_json(agent.pending_live_result)
     history = agent.event_history
     return {
         "agent_id": agent.agent_id,
@@ -400,6 +413,7 @@ def agent_to_dict(agent: Agent) -> dict:
         "turn_count": agent.turn_count,
         "pending_retreat_prompt": agent.pending_retreat_prompt,
         "pending_clarification": pending_clarification,
+        "pending_live_result": pending_live_result,
         "consecutive_breakthrough_failures": agent.consecutive_breakthrough_failures,
         "is_npc": agent.is_npc,
     }
@@ -416,12 +430,9 @@ def agent_from_dict(d: dict) -> Agent:
     )
     history._sequence = history_d.get("sequence", 0)
 
-    pending_scenario = None
-    if d.get("pending_scenario") is not None:
-        pending_scenario = PendingScenario(**d["pending_scenario"])
-    pending_clarification = None
-    if d.get("pending_clarification") is not None:
-        pending_clarification = PendingClarification(**d["pending_clarification"])
+    pending_scenario = _pending_from_json(d.get("pending_scenario"), PendingScenario)
+    pending_clarification = _pending_from_json(d.get("pending_clarification"), PendingClarification)
+    pending_live_result = _pending_from_json(d.get("pending_live_result"), PendingLiveResult)
 
     time_anchor_d = d["time_anchor"]
     return Agent(
@@ -455,6 +466,7 @@ def agent_from_dict(d: dict) -> Agent:
         turn_count=d.get("turn_count", 0),
         pending_retreat_prompt=d.get("pending_retreat_prompt", False),
         pending_clarification=pending_clarification,
+        pending_live_result=pending_live_result,
         consecutive_breakthrough_failures=d.get("consecutive_breakthrough_failures", 0),
         is_npc=d.get("is_npc", False),
     )

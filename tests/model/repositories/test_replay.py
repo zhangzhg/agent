@@ -39,6 +39,65 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(reloaded.pending_encounter_id, "fish")
         self.assertEqual(reloaded.event_history.trigger_count("eat"), 1)
 
+    def test_every_pending_dataclass_field_survives_round_trip(self):
+        """结构性回归测试：三个挂起态 dataclass 的**每一个字段**都必须原样活过
+        存盘/读档。以前 codec 是逐字段手抄的（AppliedDiff 和 Agent 两侧各抄一遍，
+        共六处），漏抄一处的后果是"读档静默丢状态"、没有任何报错。现在 codec 按
+        `dataclasses.fields` 自动展开，这条测试则从外部盯住结果：以后给任何一个
+        挂起态 dataclass 加字段，忘了处理就会在这里红。"""
+        from dataclasses import fields as dc_fields
+
+        from model.domain.agent import PendingClarification, PendingLiveResult, PendingScenario
+
+        agent = make_agent()
+        agent.pending_scenario = PendingScenario("sc1", "node_a", "host_evt")
+        agent.pending_clarification = PendingClarification("原话", "command", 2)
+        agent.pending_live_result = PendingLiveResult(
+            event_id="live_abc",
+            deferred_result_pool=({"kind": "state_change", "field": "money", "delta": -3.0},),
+            narrative_hint="埋了个伏笔",
+            attempts=1,
+        )
+        self.repo.save(agent)
+
+        reloaded = self.repo.load("A")
+
+        for attr in ("pending_scenario", "pending_clarification", "pending_live_result"):
+            original, restored = getattr(agent, attr), getattr(reloaded, attr)
+            self.assertIsNotNone(restored, f"{attr} 整个丢了")
+            for f in dc_fields(original):
+                with self.subTest(pending=attr, field=f.name):
+                    self.assertEqual(
+                        getattr(restored, f.name), getattr(original, f.name),
+                        f"{attr}.{f.name} 没能原样读回来",
+                    )
+
+    def test_pending_live_result_pool_is_restored_as_tuple(self):
+        """frozen dataclass 里放 list 会破坏可哈希性、也跟运行时构造的实例不等价，
+        JSON 反序列化必须还原成 tuple。"""
+        from model.domain.agent import PendingLiveResult
+
+        agent = make_agent()
+        agent.pending_live_result = PendingLiveResult(
+            "live_x", ({"kind": "state_change", "field": "money", "delta": 1.0},), "hint"
+        )
+        self.repo.save(agent)
+
+        restored = self.repo.load("A").pending_live_result
+        self.assertIsInstance(restored.deferred_result_pool, tuple)
+
+    def test_unknown_keys_in_saved_pending_state_are_ignored(self):
+        """旧存档里可能带着已经删掉的字段——多余的键应该被忽略，而不是让
+        dataclass 构造炸掉、整个存档读不回来。"""
+        from model.domain.agent import PendingScenario
+        from model.repositories.codec import _pending_from_json
+
+        restored = _pending_from_json(
+            {"scenario_id": "s", "current_node_id": "n", "host_event_id": "h", "早就删掉的字段": 1},
+            PendingScenario,
+        )
+        self.assertEqual(restored.scenario_id, "s")
+
     def test_zero_duration_event_at_snapshot_boundary_is_not_replayed_twice(self):
         """回归测试：save() 用 agent 当前时刻当 `at`；如果一条事件 duration_shichen=0
         （时钟压根没往前挪，occurred_at 恰好等于快照时刻），下一次 load() 不该把它

@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from model.services.chat_parser import INSPECT_NPC_EVENT_ID, MOVE_EVENT_ID, QUERY_EVENT_IDS, SCAN_EVENT_ID
 from model.services.play_turn import default_move_def
+from model.services.world_query_assistant import looks_like_info_question
 from view.narrative_renderer import placeholders_from, render_turn
 from view.npc_info_card_view import render_npc_info_card
 from view.schemas.chat_schemas import ChatRequest, ChatResponse
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
     from model.domain.map import WorldView
     from model.services.play_turn import PlayTurnService
     from model.services.ports import AgentRepository, EventRepository, WorldRepository
+    from model.services.world_query_assistant import WorldQueryAssistant
 
 
 class ChatController:
@@ -34,16 +36,28 @@ class ChatController:
         play_turn: "PlayTurnService",
         events: "EventRepository",
         rng: "random.Random | None" = None,
+        world_query: "WorldQueryAssistant | None" = None,
     ) -> None:
         self._agent_repo = agent_repo
         self._world_repo = world_repo
         self._play_turn = play_turn
         self._events = events
         self._rng = rng or random.Random()  # 神识扫描（_handle_scan）用；与对局的 rng 无需同一份
+        self._world_query = world_query
 
     def on_player_message(self, raw_text: str, agent_id: str) -> ChatResponse:
         agent = self._agent_repo.load(agent_id)
         world = self._world_repo.assemble_view()
+
+        # 世界信息问答（"我在哪里""离我最近的城市有哪些"）跟 inspect_npc/scan 一样
+        # 只读、不消耗回合，但检测方式不一样：不是精确别名表，是关键词粗筛 + 让
+        # WorldQueryAssistant 自己用 function calling 判断"这真的是在问信息吗、
+        # 答不答得上来"。判断下来不是（或者没配大模型/调用失败）就原样往下走，
+        # 当作没发生过——绝不能因为关键词猜错了，就把一句正常的游戏指令截胡。
+        if self._world_query is not None and looks_like_info_question(raw_text):
+            answer = self._world_query.answer(agent, world, raw_text)
+            if answer is not None:
+                return ChatResponse(narrative=answer, agent_state=agent.state.name)
 
         # 只读查询命令不进两段式循环：不改状态、不消耗回合、不进 AgentEventHistory。
         cmd = self._play_turn.parser.parse(raw_text, agent.scene_focus)

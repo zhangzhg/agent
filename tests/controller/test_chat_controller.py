@@ -163,5 +163,82 @@ class ChatControllerTests(unittest.TestCase):
         world_repo.save.assert_not_called()
 
 
+class WorldQueryAssistantWiringTests(unittest.TestCase):
+    """"我在哪里"这类世界信息问答：命中关键词粗筛后交给 WorldQueryAssistant，
+    答上来就直接回文案、不进两段式循环；助手判断"这其实不是在问信息"（返回
+    None）就原样回落到正常的命令解析流程，不能截胡一句正常的游戏指令。"""
+
+    def test_info_question_answered_by_assistant_bypasses_play_turn(self):
+        agent = make_agent()
+        agent_repo = MagicMock()
+        agent_repo.load.return_value = agent
+        world_repo = MagicMock()
+        world_repo.assemble_view.return_value = make_world()
+        play_turn = _non_query_play_turn_mock()
+        events = MagicMock()
+        world_query = MagicMock()
+        world_query.answer.return_value = "你现在在某城。"
+
+        controller = ChatController(agent_repo, world_repo, play_turn, events, world_query=world_query)
+        response = controller.on_player_message("我在哪里", "A")
+
+        world_query.answer.assert_called_once_with(agent, world_repo.assemble_view.return_value, "我在哪里")
+        play_turn.handle_player_text.assert_not_called()
+        self.assertEqual(response.narrative, "你现在在某城。")
+
+    def test_assistant_declining_falls_back_to_normal_pipeline(self):
+        agent = make_agent()
+        agent_repo = MagicMock()
+        agent_repo.load.return_value = agent
+        world_repo = MagicMock()
+        world_repo.assemble_view.return_value = make_world()
+        play_turn = _non_query_play_turn_mock()
+        play_turn.handle_player_text.return_value = TurnResult()
+        events = MagicMock()
+        events.get_by_id.return_value = None
+        world_query = MagicMock()
+        world_query.answer.return_value = None  # 判断下来不是信息问答／没答上来
+
+        controller = ChatController(agent_repo, world_repo, play_turn, events, world_query=world_query)
+        controller.on_player_message("我在哪里能买到好装备", "A")
+
+        play_turn.handle_player_text.assert_called_once()
+
+    def test_no_world_query_configured_skips_straight_to_normal_pipeline(self):
+        """没配大模型时 world_query 是 None——关键词命中也不该报错，直接走原流程。"""
+        agent = make_agent()
+        agent_repo = MagicMock()
+        agent_repo.load.return_value = agent
+        world_repo = MagicMock()
+        world_repo.assemble_view.return_value = make_world()
+        play_turn = _non_query_play_turn_mock()
+        play_turn.handle_player_text.return_value = TurnResult()
+        events = MagicMock()
+        events.get_by_id.return_value = None
+
+        controller = ChatController(agent_repo, world_repo, play_turn, events, world_query=None)
+        controller.on_player_message("我在哪里", "A")
+
+        play_turn.handle_player_text.assert_called_once()
+
+    def test_non_info_text_never_reaches_the_assistant(self):
+        """关键词粗筛没命中——压根不该调用助手（省一次没必要的大模型请求）。"""
+        agent = make_agent()
+        agent_repo = MagicMock()
+        agent_repo.load.return_value = agent
+        world_repo = MagicMock()
+        world_repo.assemble_view.return_value = make_world()
+        play_turn = _non_query_play_turn_mock()
+        play_turn.handle_player_text.return_value = TurnResult()
+        events = MagicMock()
+        events.get_by_id.return_value = None
+        world_query = MagicMock()
+
+        controller = ChatController(agent_repo, world_repo, play_turn, events, world_query=world_query)
+        controller.on_player_message("吃饭", "A")
+
+        world_query.answer.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

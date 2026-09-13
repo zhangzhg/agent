@@ -23,6 +23,7 @@ from model.domain.system_events import AgentStateChanged
 from model.services.arbiter import ArbitrationDecision, EventArbiter
 from model.services.chat_parser import MOVE_EVENT_ID, ParsedCommand, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
 from model.services.event_validation import ValidationCatalog, validate_event_def
+from model.services.game_context_tools import list_all_locations
 from model.services.live_content_author import LiveAuthorOutcome, LiveContentAuthor
 from model.services.live_narrative_writer import generate_live_variant_text
 from model.services.matching import (
@@ -40,6 +41,17 @@ from model.services.matching import (
 from model.services.pipeline import Pipeline, PipelineContext
 from model.services.retreat_intent_parser import parse_retreat_duration, stop_when_realm_reached
 from model.services.turn_result import TurnResult
+
+# 优化策略.md 终极兜底用的预置事件（content/events/commands.py::IDLE_WANDER）。
+# 不用 chat_parser.py 那套 MOVE_EVENT_ID/RETREAT_START_EVENT_ID 常量的路子，因为
+# idle_wander 不是系统命令，只是一个普通的、seed 时就发布好的命令型事件——直接按
+# event_id 字符串查库即可，跟 EAT/MEDITATE 等其他内置命令没有本质区别。
+IDLE_WANDER_EVENT_ID = "idle_wander"
+
+# PendingLiveResult 每轮问一次"故事线是否收尾"，连问这么多轮都没结果就强制
+# 落地——跟 PendingClarification 的 3 次上限同一个数量级，理由一样：不能让玩家
+# 没兴趣接话就把一个伏笔永远悬在那儿、锁死"未结束不能抽下一个奇遇"的限制。
+_LIVE_RESULT_MAX_WAIT_TURNS = 3
 
 if TYPE_CHECKING:
     from model.domain.agent import Agent
@@ -155,6 +167,12 @@ class PlayTurnService:
         # 每轮输入都计数（成功/失败都算），驱动"提示只出现在前 3 轮"（GAME_DESIGN §1.1）
         apply_agent_diff(agent, AppliedDiff(attr_deltas=(("turn_count", 1.0),)))
 
+        # -1) 实时创作事件留的延迟结果——每轮先问一句"这句话算不算把上一条伏笔
+        # 翻篇了"，这是纯副作用（落地/续挂），不吃掉 raw、不提前 return，下面该
+        # 怎么解析这句话本身照常进行（见 model/domain/agent.py::PendingLiveResult）。
+        if agent.pending_live_result is not None:
+            self._maybe_conclude_live_result(agent, raw)
+
         # 0) 闭关时长追问优先于一切（GAME_DESIGN §4.3）：一句话答不上就一直卡在这
         if agent.pending_retreat_prompt:
             return self._handle_retreat_answer(agent, world, raw)
@@ -182,7 +200,7 @@ class PlayTurnService:
                 return resolved
             cmd = resolved
         if cmd is None:
-            return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+            return self._terminal_fallback(agent, world)
         return self._dispatch_command(agent, world, cmd)
 
     def _dispatch_command(self, agent: "Agent", world: "WorldView", cmd) -> TurnResult:
@@ -198,7 +216,7 @@ class PlayTurnService:
 
         defn = self.events.get_by_id(cmd.event_id)
         if defn is None or defn.is_draft or not defn.is_command:
-            return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+            return self._terminal_fallback(agent, world)
         defn = self._ensure_variants(defn)
         occ = self._new_occurrence(agent, defn, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, defn) or TurnResult.rejected("现在做不了这个。")
@@ -228,7 +246,7 @@ class PlayTurnService:
             if isinstance(resolved, TurnResult):
                 return resolved
             if resolved is None:
-                return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+                return self._terminal_fallback(agent, world)
             return self._dispatch_command(agent, world, resolved)
         outcome = self._author_live_destination_outcome(agent, world, combined)
         resolved = self._resolve_location_outcome(agent, world, outcome, combined, pending.attempts)
@@ -237,6 +255,28 @@ class PlayTurnService:
         if resolved is None:
             return TurnResult.rejected(f"找不到「{combined}」这个地方。")
         return self._complete_move(agent, world, resolved)
+
+    def _terminal_fallback(self, agent: "Agent", world: "WorldView") -> TurnResult:
+        """优化策略.md 的"终极兜底"原则：规则解析/向量意图/实时创作（含追问）
+        全部走不通时，绝不能让玩家看到干瘪的拒绝。GAME_DESIGN §1.1 的前 3 轮
+        软性引导（_soft_guidance_message 会给出招式举例）保留不变；从第 4 轮起，
+        原本落在这里的"听不懂，再说一次？"改由 _idle_wander_fallback 接管——
+        直接执行预置的 idle_wander 事件，给玩家一段"什么都没发生，但话确实被
+        听懂了"的旁白，并按其配置消耗一点时间，而不是被系统当场拒绝。"""
+        if agent.turn_count > 3:
+            return self._idle_wander_fallback(agent, world)
+        return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+
+    def _idle_wander_fallback(self, agent: "Agent", world: "WorldView") -> TurnResult:
+        defn = self.events.get_by_id(IDLE_WANDER_EVENT_ID)
+        if defn is None or defn.is_draft or not defn.is_command:
+            # 预置事件本该总是存在——防御性兜底，理论上不会走到这里。
+            return TurnResult.parse_failed(self._soft_guidance_message(agent, world))
+        defn = self._ensure_variants(defn)
+        occ = self._new_occurrence(agent, defn, TriggerSource.PLAYER)
+        return self.execute_occurrence(agent, world, occ, defn) or TurnResult.parse_failed(
+            self._soft_guidance_message(agent, world)
+        )
 
     def _soft_guidance_message(self, agent: "Agent", world: "WorldView") -> str:
         """GAME_DESIGN §1.1：前 3 轮给软性引导（从当前地点合格池现取别名举例），
@@ -326,10 +366,11 @@ class PlayTurnService:
             # 开头的事件时，总不能只看到一个 id，拿第一条变体文案顶上。
             "description": (outcome.command_raw.get("variants") or [""])[0],
         }
-        # load_event_defs(None) 不是 list_all()：list_all() 明确标注"只供录入编辑器
-        # 用，对局路径必须走 load_event_defs()"（草稿会被过滤掉），这里虽然只是拿
-        # id 集合做联动校验，也不该破例。
-        catalog = ValidationCatalog(known_event_ids={e.event_id for e in self.events.load_event_defs(None)})
+        # 只要 id 集合，走 published_event_ids() 而不是 load_event_defs(None)——
+        # 后者会把整个事件库反序列化一遍，而 live_ 事件只增不减，这里每处理一句
+        # 没听懂的话就要来一次，成本随对局时长线性上涨。语义不变：同样只认已发布
+        # 事件，不含草稿（list_all() 那种"含草稿"的读法对局路径依然不许用）。
+        catalog = ValidationCatalog(known_event_ids=self.events.published_event_ids())
         defn, errors = validate_event_def(raw_event, catalog)
         if defn is None:
             _logger.warning("实时创作的事件没通过校验：%s", errors)
@@ -345,7 +386,45 @@ class PlayTurnService:
         if narrative_text:
             defn = replace(defn, narrative_embedding=embed_safely(self.embedding, narrative_text))
         self.events.save_event_def(defn)
+        # 这个动作留了一个"当下还没兑现"的另一面影响——记下事件 id + 待触发结果，
+        # 等下一轮判断"故事线是否收尾"后再落地（PendingLiveResult 类注释/
+        # _maybe_conclude_live_result）。绝大多数事件没有这部分，什么都不用做。
+        deferred_pool = outcome.command_raw.get("deferred_result_pool") or []
+        if deferred_pool:
+            from model.domain.agent import PendingLiveResult
+
+            apply_agent_diff(agent, AppliedDiff(pending_live_result_set=PendingLiveResult(
+                event_id=defn.event_id,
+                deferred_result_pool=tuple(deferred_pool),
+                narrative_hint=(outcome.command_raw.get("variants") or [""])[0],
+            )))
         return ParsedCommand(event_id=defn.event_id, location_hint=None, target=None, args={})
+
+    def _maybe_conclude_live_result(self, agent: "Agent", raw: str) -> None:
+        """PendingLiveResult 每轮问一次"玩家这句话算不算把伏笔翻篇了"：算，就把
+        攒着的 state_change 一次性落地、清挂起态，解除 execute_occurrence 里
+        "未结束不能抽下一个奇遇"的限制；连问 _LIVE_RESULT_MAX_WAIT_TURNS 轮都没
+        收尾（或者压根没配大模型没法判断），也强制落地——不能让一个伏笔永远悬着
+        把奇遇抽取锁死。这是纯副作用，不返回值，raw 本身接下来还要被正常解析。"""
+        pending = agent.pending_live_result
+        concluded = False
+        if self._live_content_author is not None:
+            concluded = self._live_content_author.check_storyline_concluded(pending.narrative_hint, raw)
+        attempts = pending.attempts + 1
+        if not concluded and attempts <= _LIVE_RESULT_MAX_WAIT_TURNS:
+            from model.domain.agent import PendingLiveResult
+
+            apply_agent_diff(agent, AppliedDiff(
+                pending_live_result_set=PendingLiveResult(
+                    event_id=pending.event_id,
+                    deferred_result_pool=pending.deferred_result_pool,
+                    narrative_hint=pending.narrative_hint,
+                    attempts=attempts,
+                )
+            ))
+            return
+        attr_deltas = tuple((item["field"], item["delta"]) for item in pending.deferred_result_pool)
+        apply_agent_diff(agent, AppliedDiff(attr_deltas=attr_deltas, pending_live_result_set=None))
 
     # ---------- 系统命令：move / retreat_start（GAME_DESIGN §3.1，非库内事件）----------
     def _handle_move(self, agent: "Agent", world: "WorldView", cmd) -> TurnResult:
@@ -371,28 +450,18 @@ class PlayTurnService:
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, synthetic) or TurnResult.rejected("现在做不了这个。")
 
-    def _list_visible_locations(self, world: "WorldView") -> list[dict]:
-        """给 LiveContentAuthor 的 list_locations 工具用（真正的 function calling，
-        见 live_content_author.py/llm_tool_loop.py）——只列玩家看得到的地点，
-        隐藏未发现的不给：不能让模型拿神识扫描都没发现的秘境当"已有地点"回答
-        玩家，跟 WorldView.find_location_by_name 的可见性规则一致。"""
-        state = world.mutable_state()
-        return [
-            {"location_id": loc.location_id, "name": loc.name, "location_type": loc.location_type}
-            for loc in state.locations.values()
-            if not loc.hidden or loc.discovered
-        ]
-
     def _author_live_destination_outcome(self, agent: "Agent", world: "WorldView", hint: str) -> LiveAuthorOutcome:
         """`find_location_by_name` 找不到目的地时的最后一层兜底——实时创作一个新
         地点（LiveContentAuthor，README §1.12 的有意识例外，见 live_content_author.py
-        顶部说明），带 list_locations 工具查真实地点数据。"""
+        顶部说明），带 list_locations 工具查真实地点数据（game_context_tools.py::
+        list_all_locations 的可见性过滤跟这里要的完全一样，直接复用，不再自己
+        内联一份）。"""
         if self._live_content_author is None or _looks_like_gibberish(hint):
             return LiveAuthorOutcome(kind="reject")
         current_name = world.name_of(agent.location_id)
         current_type = world.location_type_of(agent.location_id)
         return self._live_content_author.author_location(
-            hint, current_name, current_type, lambda: self._list_visible_locations(world)
+            hint, current_name, current_type, lambda: list_all_locations(world)
         )
 
     def _resolve_location_outcome(
@@ -506,6 +575,19 @@ class PlayTurnService:
             return TurnResult.rejected("现在做不了这个。")
         agent.state = new_state
 
+        if occ.trigger_source is TriggerSource.PLAYER and defn.needs_reply:
+            # 分支事件（LiveContentAuthor 的 reply_options，见 README 待补充章节）：
+            # 只叙述、不结算——跟第二段奇遇 needs_reply 时完全同一套挂起机制
+            # （pending_encounter_id + _try_resolve_pending/_resolve_reply_option），
+            # 这里是"第一段命令本身就是分支事件"这个新场景，直接复用而不是另起
+            # 一套。时间推进/事件历史记录都留到真正选中某个分支时才发生（同样
+            # 跟既有 _resolve_reply_option 的行为一致，不单独对这条路径加特殊
+            # 处理，避免两套 needs_reply 事件的时间语义不一致）。
+            self._park_encounter(agent, defn)
+            agent.state = agent.state.settle(agent)
+            variant = pick_variant(defn, agent.event_history, self.rng)
+            return TurnResult().with_prompt(defn, variant)
+
         ctx = PipelineContext(occ, defn, agent, world, chosen_variant=occ.chosen_variant_index)
         ctx = self.pipeline.run(ctx)
         if ctx.rejected:
@@ -524,7 +606,11 @@ class PlayTurnService:
         first = TurnResult.from_one(defn, ctx)
         if ctx.stopped:
             return first
-        if occ.trigger_source is TriggerSource.PLAYER and defn.is_command:
+        # 上一条实时创作事件的延迟结果还没收尾时，不抽新的第二段奇遇——避免
+        # 一条伏笔还悬着，又平白冒出一个不相关的新奇遇，破坏聊天的连贯性
+        # （PendingLiveResult 类注释）。命令本身该怎么结算不受影响，只是不再
+        # 往上叠加随机奇遇。
+        if occ.trigger_source is TriggerSource.PLAYER and defn.is_command and agent.pending_live_result is None:
             return self._second_stage(agent, world, first)
         return first
 
@@ -679,18 +765,12 @@ class PlayTurnService:
 
     # ---------- 挂起态辅助 ----------
     def _park_encounter(self, agent: "Agent", defn: "GameEventDef") -> None:
-        from model.domain.diff import AppliedDiff, apply_agent_diff
-
         apply_agent_diff(agent, AppliedDiff(pending_encounter_set=defn.event_id))
 
     def _clear_pending_encounter(self, agent: "Agent") -> None:
-        from model.domain.diff import AppliedDiff, apply_agent_diff
-
         apply_agent_diff(agent, AppliedDiff(pending_encounter_set=""))
 
     def _clear_pending_scenario(self, agent: "Agent") -> None:
-        from model.domain.diff import AppliedDiff, apply_agent_diff
-
         apply_agent_diff(agent, AppliedDiff(pending_scenario_set=None))
 
     def _abandon_pending(self, agent: "Agent") -> None:

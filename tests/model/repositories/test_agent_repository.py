@@ -116,6 +116,30 @@ class SnapshotTimestampRegressionTests(unittest.TestCase):
             self.assertEqual(self.repo.load("npc_a").money, 20.0)
             self.assertEqual(self.repo.load("npc_b").money, 200.0)
 
+    def test_pending_live_result_survives_save_and_reload(self):
+        """新加的挂起字段——codec.py 顶部注释说得很明白："读档丢一个都会露馅"，
+        这里直接验证一遍存盘/读档不丢。"""
+        from model.domain.agent import PendingLiveResult
+
+        agent = make_agent(agent_id="player")
+        apply_agent_diff(agent, AppliedDiff(pending_live_result_set=PendingLiveResult(
+            event_id="live_abc123",
+            deferred_result_pool=({"kind": "state_change", "field": "heart_demon", "delta": -0.02},),
+            narrative_hint="你帮了个忙，但也可能得罪了对头。",
+            attempts=1,
+        )))
+        self.repo.save(agent)
+
+        loaded = self.repo.load("player")
+
+        self.assertIsNotNone(loaded.pending_live_result)
+        self.assertEqual(loaded.pending_live_result.event_id, "live_abc123")
+        self.assertEqual(
+            loaded.pending_live_result.deferred_result_pool,
+            ({"kind": "state_change", "field": "heart_demon", "delta": -0.02},),
+        )
+        self.assertEqual(loaded.pending_live_result.attempts, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -27,6 +27,7 @@ from model.repositories.llm.llm_location_author import LlmLocationAuthor
 from model.repositories.llm.llm_result_text_parser import LlmResultTextParser
 from model.repositories.llm.openai_compatible_client import OpenAiCompatibleClient
 from model.services.local_embedding import FallbackEmbeddingClient
+from model.services.world_query_assistant import WorldQueryAssistant
 from view.schemas.web_schemas import (
     CalendarPanelDTO,
     ChatApiRequest,
@@ -73,7 +74,11 @@ def create_app(db_path: str | None = None) -> FastAPI:
         # 越滚越多重复；events/items 也会把用户在编辑器里改过的同 id 内容悄悄
         # 冲回种子原文，两种都不是"重启后应该发生的事"。
         seed_all(app_ctx)
-    controller = ChatController(app_ctx.agent_repo, app_ctx.world_repo, app_ctx.play_turn, app_ctx.events, rng=app_ctx.rng)
+    world_query = WorldQueryAssistant(llm_client) if llm_client is not None else None
+    controller = ChatController(
+        app_ctx.agent_repo, app_ctx.world_repo, app_ctx.play_turn, app_ctx.events,
+        rng=app_ctx.rng, world_query=world_query,
+    )
 
     fastapi_app = FastAPI(title="太一仙途")
     fastapi_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")  # theme.css 等两页共用资源

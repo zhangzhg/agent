@@ -84,6 +84,14 @@ def narrative_fit_multiplier(event_def: "GameEventDef", ctx: MatchContext) -> fl
 # 最高只到 0.47，中间有清晰的空档，0.55 落在空档中间，两边都留了余量。
 COMMAND_INTENT_SIMILARITY_THRESHOLD = 0.55
 
+# 置信度不够自动采信、但也不是完全不沾边的"灰色地带"——不直接丢弃、也不直接
+# 采信，而是把这个候选连同玩家原话一起交给 LiveContentAuthor 判断"这到底是不是
+# 同一件事"（play_turn.py::_find_candidate_command）。下限比实测的最高假阳性
+# （0.47）还宽松一点，宁可让 LLM 多看一个不相关的候选去否决掉，也不要漏过真正
+# 该合并、只是分数差一点没到 0.55 的候选，导致实时创作里重复堆出一堆意思相同
+# 只是措辞不同的事件。
+COMMAND_INTENT_CANDIDATE_THRESHOLD = 0.4
+
 
 def find_best_matching_command(
     candidates: list["GameEventDef"], query_embedding: tuple[float, ...], threshold: float = COMMAND_INTENT_SIMILARITY_THRESHOLD

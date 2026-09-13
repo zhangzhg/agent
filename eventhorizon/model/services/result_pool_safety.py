@@ -22,6 +22,26 @@ FIELD_HINT = (
     "cultivation（修为，常见范围 -20~30）、heart_demon（心魔，越低越好，常见范围 -0.05~0.1）"
 )
 
+# FIELD_HINT 里的"常见范围"只是 prompt 里给模型的措辞，从没在代码里真正强制过——
+# 实测 glm-4-flash 有时会给出远超这个范围的数值（比如"买人参"给了 money delta
+# -200/-100，而不是提示里的 -20~30），大概是被"标价不菲"这类叙事细节带偏，
+# 没意识到这个字段其实有隐含上限。放行任意大小的 delta 有实际风险（一次事件就能
+# 把玩家的钱清空/修为爆表），所以在这里按"常见范围"的 2 倍设一个硬上限——比提示
+# 的常见范围宽松，给叙事留余地，但不能离谱到毁掉数值平衡。超界不丢弃整条，直接
+# clamp 到边界，比丢弃更贴近模型原本的意图（它想表达"很贵/很有用"，只是数值离谱，
+# clamp 到上限依然保留了"这次变化比较大"的方向和相对强度）。
+_DELTA_CLAMP_RANGE = {
+    "money": (-60.0, 60.0),
+    "satiety": (-30.0, 30.0),
+    "cultivation": (-60.0, 60.0),
+    "heart_demon": (-0.2, 0.2),
+}
+
+
+def _clamp_delta(field: str, delta: float) -> float:
+    lo, hi = _DELTA_CLAMP_RANGE.get(field, (-60.0, 60.0))
+    return max(lo, min(hi, delta))
+
 
 def sanitize_result_pool(raw_pool) -> list[dict]:
     if not isinstance(raw_pool, list):
@@ -37,7 +57,50 @@ def sanitize_result_pool(raw_pool) -> list[dict]:
             delta = float(entry.get("delta"))
         except (TypeError, ValueError):
             continue
-        out.append({"kind": "state_change", "field": field, "delta": delta})
+        out.append({"kind": "state_change", "field": field, "delta": _clamp_delta(field, delta)})
         if len(out) >= 3:  # 别让一条事件的 result_pool 堆得离谱长
+            break
+    return out
+
+
+def sanitize_branch_results(raw_results) -> list[dict]:
+    """live_content_author.py 的分支结果（ReplyOption.results）专用——比
+    sanitize_result_pool 多放行一种 item_drop，因为分支的典型场景就是"要不要
+    拿下一件具体的实物"（README 待补充章节：实时创作事件的分支结果）。
+
+    item_id 不校验是否在物品目录里登记过：跟事件本身的 event_id（live_xxxxx）
+    一样是这次对局临时创作、不经草稿审核的产物，Inventory 只是个
+    dict[item_id, count]（model/domain/items.py），不要求 item_id 对应真实
+    ItemDef；没有 ItemDef 时背包面板会直接拿 item_id 本身当显示名
+    （view/inventory_panel_view.py），只要模型给的是一个可读的中文物品名当
+    item_id，玩家看到的就是正常的物品名称，不会显示成一串乱码 id。"""
+    if not isinstance(raw_results, list):
+        return []
+    out: list[dict] = []
+    for entry in raw_results:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        if kind == "state_change":
+            field = entry.get("field")
+            if field not in SAFE_STATE_CHANGE_FIELDS:
+                continue
+            try:
+                delta = float(entry.get("delta"))
+            except (TypeError, ValueError):
+                continue
+            out.append({"kind": "state_change", "field": field, "delta": _clamp_delta(field, delta)})
+        elif kind == "item_drop":
+            item_id = entry.get("item_id")
+            if not isinstance(item_id, str) or not item_id.strip():
+                continue
+            try:
+                n = max(1, min(5, int(entry.get("n", 1))))
+            except (TypeError, ValueError):
+                n = 1
+            out.append({"kind": "item_drop", "item_id": item_id.strip(), "n": n})
+        else:
+            continue
+        if len(out) >= 3:
             break
     return out

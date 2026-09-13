@@ -186,4 +186,32 @@ FLEE = GameEventDef(
     is_draft=False,
 )
 
-ALL = (EAT, MEDITATE, BREAKTHROUGH, WATCH, APPRENTICE, FIGHT, FLEE)
+IDLE_WANDER = GameEventDef(
+    event_id="idle_wander",
+    applicable_locations=("*",),
+    applicable_time=None,
+    predicate=None,
+    weight=1.0,
+    duration_shichen=1,
+    cooldown_shichen=0,
+    max_trigger_per_agent=None,
+    exclusive_tags=(),
+    priority=5,
+    tags=("生活",),
+    # 优化策略.md 策略一的"通用闲逛指令"：别名+narrative_embedding 让向量兜底
+    # （_match_command_by_intent）能自然接住"到处走走看"这类含糊输入，不用专门
+    # 写关键词特判。同时也是 handle_player_text 兜底链彻底失败时的终极兜底
+    # （见 play_turn.py::_idle_wander_fallback）——不管走哪条路径命中，语义都一致：
+    # 什么都没发生，但玩家的话被"听懂"且花掉了一点时间，不是被系统拒绝。
+    aliases=("闲逛", "到处走走", "随便逛逛", "走走看看", "四处看看", "溜达溜达"),
+    result_pool=(),
+    variants=(
+        EventVariant("你在附近漫无目的地闲逛了一阵，只看到熙熙攘攘的人群，并未发现什么机缘。"),
+        EventVariant("你四处走走看看，一时没什么头绪，倒也权当散心。"),
+        EventVariant("你信步游荡了一会儿，没瞧出什么名堂，心情却松快了几分。"),
+    ),
+    is_command=True,
+    is_draft=False,
+)
+
+ALL = (EAT, MEDITATE, BREAKTHROUGH, WATCH, APPRENTICE, FIGHT, FLEE, IDLE_WANDER)
