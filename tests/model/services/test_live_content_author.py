@@ -42,11 +42,25 @@ class AuthorCommandEventTests(unittest.TestCase):
     def test_successful_generation_returns_ready_outcome(self):
         client = _FakeClient(response='[{"tags": ["生活"], "aliases": [], "variants": ["你弹了一曲。"], '
                                         '"weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
-                                        '"priority": 5, "result_pool": [], "item_query": ""}]')
+                                        '"priority": 5, "result_pool": [{"kind": "state_change", "field": "satiety", "delta": -1}], '
+                                        '"item_query": ""}]')
         author = LiveContentAuthor(client)
         outcome = author.author_command_event("我想弹会儿琴", "酒楼")
         self.assertEqual(outcome.kind, "ready")
         self.assertEqual(outcome.command_raw["variants"], ["你弹了一曲。"])
+
+    def test_empty_result_pool_falls_back_to_default_effect(self):
+        """事件触发要有结果，不能"发生了"却什么都没变——prompt 已经要求"至少
+        1 条"，但实测这个模型经常直接不给（叙事文案本身是完整的）。跟直接拒绝
+        相比，给一个方向稳妥的默认效果更实用，不会因为模型漏填一个字段就把写好
+        的叙事整个扔掉。"""
+        client = _FakeClient(response='[{"tags": ["生活"], "aliases": [], "variants": ["你弹了一曲。"], '
+                                        '"weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
+                                        '"priority": 5, "result_pool": [], "item_query": ""}]')
+        author = LiveContentAuthor(client)
+        outcome = author.author_command_event("我想弹会儿琴", "酒楼")
+        self.assertEqual(outcome.kind, "ready")
+        self.assertTrue(outcome.command_raw["result_pool"])
 
     def test_needs_clarification_outcome(self):
         client = _FakeClient(response='{"needs_clarification": true, "question": "你想对谁做这件事？"}')

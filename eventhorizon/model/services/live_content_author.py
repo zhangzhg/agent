@@ -42,6 +42,15 @@ from model.services.result_pool_safety import sanitize_result_pool
 
 _logger = logging.getLogger("eventhorizon.live_content_author")
 
+# 事件触发要有结果，不能"发生了"却什么都没变——prompt 已经明确要求 result_pool
+# 至少给 1 条，但实测这个模型（glm-4-flash）经常直接不给，哪怕叙事文案写得很
+# 完整（三次连续试验，"帮老太太挑水""弹一曲高山流水""帮摊主吆喝""给乞丐钱"
+# "练拳法"全部没带 result_pool）。跟拒绝整个事件相比，给一个不痛不痒但方向
+# 稳妥的默认效果更实用——总不能因为模型漏填一个字段，就把一句写得好好的叙事
+# 整个扔掉，逼玩家重说一遍。用"修为略有精进"：小幅正面、跟叙事内容无关也不
+# 违和，比乱猜"该加钱还是扣钱"安全。
+_DEFAULT_RESULT_POOL = [{"kind": "state_change", "field": "cultivation", "delta": 1.0}]
+
 
 class LlmClient(Protocol):
     def complete(self, prompt: str) -> str: ...
@@ -66,8 +75,11 @@ _COMMAND_PROMPT_TEMPLATE = (
     '40-120字，古风白话文风格"], "weight": 1.0, "duration_shichen": 1, '
     '"cooldown_shichen": 0, "priority": 5, "result_pool": [], "item_query": ""}}]\n'
     "（这一支适用：tags 从「生活、修炼、社交、奇遇、战斗、经济」里选 1-2 个；"
-    "result_pool 只能是 state_change，field 只能从这几个里选：" + _FIELD_HINT + "，"
-    "没有实际影响就给空数组；variants 里只能用这些占位符：{{地点}} {{境界}} {{金钱}} "
+    "result_pool 至少给 1 条、最多 3 条，不能给空数组——玩家做了这个动作，就该有"
+    "点什么随之变化，哪怕很小（帮了别人得点感激/小赏钱，出了力饱食略降，动了气"
+    "心魔略升，破财或得财，诸如此类），不能让「发生了」和「什么都没变」划等号；"
+    "只能是 state_change，field 只能从这几个里选：" + _FIELD_HINT + "；"
+    "variants 里只能用这些占位符：{{地点}} {{境界}} {{金钱}} "
     "{{年龄}} {{天气}} {{对象}}）"
 )
 
@@ -156,6 +168,12 @@ class LiveContentAuthor:
         variants = [str(v).strip() for v in item.get("variants", []) if str(v).strip()]
         if not variants:
             return LiveAuthorOutcome(kind="reject")
+        result_pool = sanitize_result_pool(item.get("result_pool"))
+        if not result_pool:
+            # 模型没给结果——不拒绝（叙事文案往往是完整的，扔掉太浪费），落到
+            # 模块顶部的 _DEFAULT_RESULT_POOL，见那边注释。
+            _logger.warning("实时创作的事件缺少 result_pool，落到默认效果：%s", variants[0])
+            result_pool = list(_DEFAULT_RESULT_POOL)
         command_raw = {
             "tags": [str(t).strip() for t in item.get("tags", []) if str(t).strip()],
             "aliases": [str(a).strip() for a in item.get("aliases", []) if str(a).strip()],
@@ -164,7 +182,7 @@ class LiveContentAuthor:
             "duration_shichen": _clamp_int(item.get("duration_shichen"), default=1, lo=0, hi=8),
             "cooldown_shichen": _clamp_int(item.get("cooldown_shichen"), default=0, lo=0, hi=48),
             "priority": _clamp_int(item.get("priority"), default=5, lo=1, hi=9),
-            "result_pool": sanitize_result_pool(item.get("result_pool")),
+            "result_pool": result_pool,
         }
         return LiveAuthorOutcome(kind="ready", command_raw=command_raw)
 

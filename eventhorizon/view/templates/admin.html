@@ -416,7 +416,11 @@
         <div class="hint">保存时会尝试从这段话里提取明确的数值得失（金钱/饱食/修为/心魔），写成真正的游戏效果；提取不出来或没配置 LLM 时只当描述文字存着，不影响保存。</div>
       </fieldset>
 
-      <div class="hint" id="ev-variants-hint" style="display:none">此事件已有文案变体（AI 生成或旧版数据），保留不动；这里不提供编辑，触发时若为空会由 LLM 现场补一句叙事并存回。</div>
+      <fieldset id="ev-variants-display" style="display:none">
+        <legend>触发时玩家看到的文案（只读）</legend>
+        <div id="ev-variants-list"></div>
+        <div class="hint">这是事件命中时玩家实际看到的叙事文案（variants）——AI 生成/实时创作/旧版数据带来的，这里不提供编辑，保存时原样带回去；如需修改，请联系开发直接改库。留空的事件触发时会由 LLM 现场补一句并存回，之后同一个事件命中就会在这里看到。</div>
+      </fieldset>
       <div class="hint" id="ev-reply-hint" style="display:none">此事件已有局部选项（needs_reply，旧版数据），保留不动，这里不提供编辑。</div>
       </div>
       <div class="actions-footer">
@@ -1315,7 +1319,10 @@ async function loadEventDetail(id) {
   loadedEventReplyOptions = d.reply_options || [];
   $("ev-predicate-old-hint").style.display = loadedEventPredicate ? "" : "none";
   $("ev-result-old-hint").style.display = loadedEventResultPool.length ? "" : "none";
-  $("ev-variants-hint").style.display = loadedEventVariants.length ? "" : "none";
+  $("ev-variants-display").style.display = loadedEventVariants.length ? "" : "none";
+  $("ev-variants-list").innerHTML = loadedEventVariants
+    .map(v => `<div class="hint" style="color:var(--text); font-size:13px; margin-top:4px">「${escapeHtml(v.text)}」</div>`)
+    .join("");
   $("ev-reply-hint").style.display = loadedEventReplyOptions.length ? "" : "none";
   $("ev-errors").textContent = ""; $("ev-ok").textContent = "";
   $("sim-event-id").value = d.event_id;
@@ -1329,7 +1336,8 @@ function clearEventForm() {
   $("ev-is-command").checked = false; $("ev-is-draft").checked = true;
   loadedEventPredicate = null; loadedEventResultPool = []; loadedEventVariants = []; loadedEventReplyOptions = [];
   $("ev-predicate-old-hint").style.display = "none"; $("ev-result-old-hint").style.display = "none";
-  $("ev-variants-hint").style.display = "none"; $("ev-reply-hint").style.display = "none";
+  $("ev-variants-display").style.display = "none"; $("ev-variants-list").innerHTML = "";
+  $("ev-reply-hint").style.display = "none";
   $("ev-errors").textContent = ""; $("ev-ok").textContent = "";
 }
 

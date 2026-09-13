@@ -96,8 +96,12 @@ LOST_CHILD = GameEventDef(
     priority=5,
     tags=("社交",),
     aliases=(),
-    result_pool=(WriteCause(tag="恩情", target="走失孩童家人", expires_years=10),),
-    variants=(EventVariant("你顺手帮一个走失的孩童找到了家人，对方千恩万谢。"),),
+    # 恩情这条因果链目前没有后续事件消费它——单独留着不会显式生效，跟旁边
+    # cangwu.py 里同类的乐善好施事件一样，因果钩子之外总要配一条玩家当场就能
+    # 看见的效果（StateChange/ItemDrop），不能让"事件触发了"和"什么都没发生"
+    # 划等号。
+    result_pool=(StateChange(field="money", delta=3), WriteCause(tag="恩情", target="走失孩童家人", expires_years=10)),
+    variants=(EventVariant("你顺手帮一个走失的孩童找到了家人，对方千恩万谢，塞给你几两银子作谢礼。"),),
     is_command=False,
     is_draft=False,
 )

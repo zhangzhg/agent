@@ -365,7 +365,8 @@ class CommandIntentFallbackTests(unittest.TestCase):
         response = (
             '[{"tags": ["生活"], "aliases": [], "variants": ["你即兴弹了一曲，'
             '琴声悠扬。"], "weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
-            '"priority": 5, "result_pool": [], "item_query": ""}]'
+            '"priority": 5, "result_pool": [{"kind": "state_change", "field": "heart_demon", "delta": -0.01}], '
+            '"item_query": ""}]'
         )
         client = _FakeLiveClient(response)
         events = InMemoryEventRepository({})
@@ -382,9 +383,33 @@ class CommandIntentFallbackTests(unittest.TestCase):
         self.assertFalse(saved.is_draft)
         self.assertTrue(saved.is_command)
         self.assertEqual(saved.variants[0].text, "你即兴弹了一曲，琴声悠扬。")
+        self.assertTrue(saved.result_pool)  # 事件触发要有结果，不能是空数组
         # 实时创作没有专门的描述字段——拿第一条变体文案顶上，事件管理列表里
         # 才不会只看到一串 live_xxxxxxxx 的 event_id。
         self.assertEqual(saved.description, "你即兴弹了一曲，琴声悠扬。")
+
+    def test_live_author_omitting_result_pool_still_succeeds_with_default_effect(self):
+        """现场实测发现：这个模型（glm-4-flash）经常写完整的叙事文案却直接漏填
+        result_pool，哪怕 prompt 明确要求"至少 1 条"。跟直接拒绝相比，落到一个
+        方向稳妥的默认效果（见 live_content_author.py::_DEFAULT_RESULT_POOL）
+        更实用——不会因为模型漏填一个字段就把写好的叙事整个扔掉、逼玩家重说。"""
+        response = (
+            '[{"tags": ["生活"], "aliases": [], "variants": ["你帮邻居家老太太挑了'
+            '两桶水，老人家连声道谢。"], "weight": 1.0, "duration_shichen": 1, '
+            '"cooldown_shichen": 0, "priority": 5, "result_pool": [], "item_query": ""}]'
+        )
+        client = _FakeLiveClient(response)
+        events = InMemoryEventRepository({})
+        play_turn = make_play_turn(events, narrative_writer=client)
+        agent = make_agent(money=10)
+        world = make_tavern_world()
+
+        result = play_turn.handle_player_text(agent, world, "帮邻居家老太太挑两桶水")
+
+        self.assertIsNone(result.parse_error)
+        self.assertIsNotNone(result.command_event_id)
+        saved = events.get_by_id(result.command_event_id)
+        self.assertTrue(saved.result_pool)
 
     def test_live_author_rejecting_falls_back_to_parse_failed(self):
         client = _FakeLiveClient("不是 JSON")
@@ -495,7 +520,8 @@ class PendingClarificationTests(unittest.TestCase):
             '{"needs_clarification": true, "question": "你想对谁做这件事？"}',
             '[{"tags": ["生活"], "aliases": [], "variants": ["你教训了那个泼皮。"], '
             '"weight": 1.0, "duration_shichen": 1, "cooldown_shichen": 0, '
-            '"priority": 5, "result_pool": [], "item_query": ""}]',
+            '"priority": 5, "result_pool": [{"kind": "state_change", "field": "heart_demon", "delta": 0.01}], '
+            '"item_query": ""}]',
         ])
         events = InMemoryEventRepository({})
         play_turn = make_play_turn(events, narrative_writer=client)
