@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from model.domain.time import GameTime
 
 
+# LiveContentAuthor 对局中实时创作的事件，event_id 一律以此开头（README §1.12）。
+# 它同时是这类事件的"来源标记"：录入编辑器靠它把玩家碎碎念产生的内容跟手工内容
+# 区分开，仓库靠它做容量回收（见 EventRepository.prune_live_events）。放在 domain
+# 只是因为它是一条 id 命名约定，创建方（services）和回收方（repositories）都要用，
+# 不适合塞进任何一边。
+LIVE_EVENT_ID_PREFIX = "live_"
+
+
 class TriggerSource(str, Enum):
     PLAYER = "player"
     SCHEDULE = "schedule"

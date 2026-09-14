@@ -10,7 +10,7 @@ from model.domain.states import ActingState, ClosedDoorState, DeadState, Encount
 from model.repositories.event_log import InMemoryEventLogStore
 from model.repositories.sqlite_event_repository import InMemoryEventRepository
 from model.services.arbiter import ArbitrationDecision
-from model.services.play_turn import _looks_like_gibberish
+from model.services.live_authoring_coordinator import looks_like_gibberish as _looks_like_gibberish
 from tests.helpers import make_agent, make_play_turn, make_tavern_world, make_time
 
 

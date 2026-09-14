@@ -330,9 +330,16 @@ GAME_DESIGN §1.1 的"前 3 轮软性引导"（`_soft_guidance_message`，举当
 - **落地**（`execute_occurrence`）——`defn.needs_reply` 为真时（`reply_options`
   非空即真），`try_transition` 校验完状态合法性之后，不跑责任链，直接
   `_park_encounter` 挂起、`agent.state.settle()` 转成 `encounter_pending`，
-  返回只带叙事提示的 `TurnResult`（`with_prompt`）。时间推进、事件历史记录都
-  留到玩家真正选中某个分支时才发生——跟库内既有 `_resolve_reply_option` 的
-  行为完全一致，没有为这条新路径单独发明一套时间语义。
+  返回只带叙事提示的 `TurnResult`（`with_prompt`）。
+- **时间语义：分支不消耗游戏时间**（明确的产品决策）——挂起时不收、玩家选中
+  某个分支时也不收，整个"叙述 + 选择"在游戏时间上是免费的。理由：玩家在一个
+  已经发生的场景里做选择，是这件事的一部分，不是又过了一个时辰。实现上由
+  `play_turn.py::_charge_time` 收口（**只有主命令和第二段奇遇调它**，分支选项
+  和流程图节点故意不调），决策记录在该函数的 docstring 里，并由
+  `tests/model/services/test_branch_time_semantics.py` 看门。
+  *已知副作用*：事件历史 `record()` 跟时间推进在同一个函数里，所以分支型事件
+  也不进 `event_history`——其 `cooldown_shichen` / `max_trigger_per_agent` 不
+  生效。这是"不计时"顺带的结果，不是单独决定过的，详见 优化建议.md P1-3。
 - **选择分支**：玩家下一句话经既有的 `pending_encounter_id` 优先级、
   `ChatParser.parse_reply` 按分支 `aliases` 做子串匹配，`_resolve_reply_option`
   跑选中分支的 `results`。玩家说了跟任何分支都不沾边的话，按"错过"丢弃挂起项

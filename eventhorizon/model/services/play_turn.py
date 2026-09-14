@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import random
-import uuid
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -22,9 +21,7 @@ from model.domain.results import StateChange
 from model.domain.system_events import AgentStateChanged
 from model.services.arbiter import ArbitrationDecision, EventArbiter
 from model.services.chat_parser import MOVE_EVENT_ID, ParsedCommand, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
-from model.services.event_validation import ValidationCatalog, validate_event_def
-from model.services.game_context_tools import list_all_locations
-from model.services.live_content_author import LiveAuthorOutcome, LiveContentAuthor
+from model.services.live_authoring_coordinator import LiveAuthoringCoordinator
 from model.services.live_narrative_writer import generate_live_variant_text
 from model.services.matching import (
     MatchContext,
@@ -48,16 +45,12 @@ from model.services.turn_result import TurnResult
 # event_id 字符串查库即可，跟 EAT/MEDITATE 等其他内置命令没有本质区别。
 IDLE_WANDER_EVENT_ID = "idle_wander"
 
-# PendingLiveResult 每轮问一次"故事线是否收尾"，连问这么多轮都没结果就强制
-# 落地——跟 PendingClarification 的 3 次上限同一个数量级，理由一样：不能让玩家
-# 没兴趣接话就把一个伏笔永远悬在那儿、锁死"未结束不能抽下一个奇遇"的限制。
-_LIVE_RESULT_MAX_WAIT_TURNS = 3
 
 if TYPE_CHECKING:
     from model.domain.agent import Agent
     from model.domain.balance import BalanceTable
     from model.domain.events import GameEventDef
-    from model.domain.map import Location, WorldView
+    from model.domain.map import WorldView
     from model.services.chat_parser import ChatParser
     from model.services.clock_service import GameClock, RetreatService
     from model.services.event_bus import EventBus
@@ -66,15 +59,6 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("eventhorizon.play_turn")
 
-
-def _looks_like_gibberish(text: str) -> bool:
-    """LiveContentAuthor 调用前的廉价本地兜底：GLM 配的小模型（glm-4-flash）就算
-    prompt 里明确要求"说不通就拒绝"，实测对着纯乱码（"asdkjhaskjdh"这种）也会
-    硬编一个场景出来，不肯拒绝——提示词管不住的部分，先在本地挡一层最明显的：
-    一个汉字都没有，基本不可能是有意义的游戏内动作描述。不追求完美（"合理但
-    无意义的中文"这类还是会被模型编出东西来，是用户已经知情接受的代价，见
-    README §1.12 的 LiveContentAuthor 例外说明），只挡最便宜能挡住的那一档。"""
-    return not any("一" <= ch <= "鿿" for ch in text)
 
 _RETREAT_PROMPT_TEXT = '要闭关多久？（可以说"十年""到金丹为止"或"随便"）'
 _RETREAT_UNPARSEABLE_TEXT = '没听懂要闭关多久，你可以说"十年""到金丹为止"或"随便"。'
@@ -115,11 +99,11 @@ class PlayTurnService:
         # 对局第二段表格），事件命中但 variants 为空时现场补一句文案，见
         # _ensure_variants()。README 5.3 对局隔离针对的是"录入侧大模型草稿生成"那个
         # 端口，不是这两个——V2 向量匹配/LlmEventWriter 本来就该在对局路径里用。
-        # LiveContentAuthor 复用同一个 narrative_writer 客户端（同一个 LlmClient
-        # Protocol），是解析彻底失败（规则 + 向量都没匹配上）时的最后一层兜底，
-        # 见 handle_player_text/_handle_move——README §1.12 的一次有意识例外，
-        # 用户已明确要求，见 live_content_author.py 顶部说明。
-        self._live_content_author = LiveContentAuthor(narrative_writer) if narrative_writer is not None else None
+        # 实时创作（README §1.12 的有意识例外）整摊逻辑都在 LiveAuthoringCoordinator
+        # 里，本类只在解析彻底失败（规则 + 向量都没匹配上）时委派过去，不自己拼
+        # LiveContentAuthor——见 live_authoring_coordinator.py 顶部说明。它复用同一个
+        # narrative_writer 客户端（同一个 LlmClient Protocol）。
+        self.live_authoring = LiveAuthoringCoordinator(events, narrative_writer, embedding=embedding)
         self.bus.subscribe(GameEventOccurrence, self._on_occurrence_published)
 
     def _ensure_variants(self, defn: "GameEventDef") -> "GameEventDef":
@@ -164,41 +148,51 @@ class PlayTurnService:
 
     # ---------- 入口：一次玩家输入 ----------
     def handle_player_text(self, agent: "Agent", world: "WorldView", raw: str) -> TurnResult:
+        """一次玩家输入的总路由。优先级从高到低，前一档接住了就不往下走：
+
+        0. **回合级副作用**——计轮数、重置大模型预算、结算上一条伏笔的延迟结果。
+           都不消费 raw，不提前返回。
+        1. **闭关时长追问**（GAME_DESIGN §4.3）：答不上来就一直卡在这一档。
+        2. **奇遇/流程图挂起态**（README 1.11）：先试局部选项，没命中就按"错过"
+           丢弃挂起项，继续往下当普通命令解析。
+        3. **追问补全**（README §1.12）：上一句被判信息不全时挂起等这一句。
+        4. **常规命令**：规则解析 → 向量意图 → 实时创作 → idle_wander 终极兜底，
+           四层依次尝试（README §1.13）。
+        """
+        # —— 0) 回合级副作用 ——
         # 每轮输入都计数（成功/失败都算），驱动"提示只出现在前 3 轮"（GAME_DESIGN §1.1）
         apply_agent_diff(agent, AppliedDiff(attr_deltas=(("turn_count", 1.0),)))
+        # 这一回合的大模型调用预算从零开始算（见 live_authoring_coordinator.LlmCallBudget）
+        self.live_authoring.begin_turn()
+        # 延迟结果：问一句"这句话算不算把上一条伏笔翻篇了"，落地或续挂，
+        # 不吃掉 raw（见 model/domain/agent.py::PendingLiveResult）
+        self.live_authoring.maybe_conclude_deferred_result(agent, raw)
 
-        # -1) 实时创作事件留的延迟结果——每轮先问一句"这句话算不算把上一条伏笔
-        # 翻篇了"，这是纯副作用（落地/续挂），不吃掉 raw、不提前 return，下面该
-        # 怎么解析这句话本身照常进行（见 model/domain/agent.py::PendingLiveResult）。
-        if agent.pending_live_result is not None:
-            self._maybe_conclude_live_result(agent, raw)
-
-        # 0) 闭关时长追问优先于一切（GAME_DESIGN §4.3）：一句话答不上就一直卡在这
+        # —— 1) 闭关时长追问 ——
         if agent.pending_retreat_prompt:
             return self._handle_retreat_answer(agent, world, raw)
 
-        # 1) 挂起态优先：先试局部选项，再回落全局命令（见 README 1.11 解析优先级）
+        # —— 2) 奇遇 / 流程图挂起态 ——
         if agent.pending_scenario is not None or agent.pending_encounter_id is not None:
             resolved = self._try_resolve_pending(agent, world, raw)
             if resolved is not None:
                 return resolved
             self._abandon_pending(agent)  # 玩家改主意：挂起项按"错过"清掉，经 diff 落库
 
-        # 1.5) 追问补全——LiveContentAuthor 上一句判断信息不全时挂起等这一句
-        # （README §1.12 LiveContentAuthor 例外，最多追问 3 次，见 _resolve_clarification）。
+        # —— 3) 追问补全 ——
         if agent.pending_clarification is not None:
             return self._resolve_clarification(agent, world, raw)
 
-        # 2) 常规命令：规则解析器 -> 向量意图兜底 -> 实时大模型创作，三层依次尝试
+        # —— 4) 常规命令的四层兜底链 ——
         cmd = self.parser.parse(raw, agent.scene_focus)
         if cmd is None:
             cmd = self._match_command_by_intent(raw, agent)
         if cmd is None:
-            outcome = self._author_live_command(agent, raw)
-            resolved = self._resolve_command_outcome(agent, outcome, raw, prior_attempts=0)
-            if isinstance(resolved, TurnResult):
-                return resolved
-            cmd = resolved
+            outcome = self.live_authoring.author_command(agent, raw)
+            resolved = self.live_authoring.resolve_command_outcome(agent, outcome, raw, prior_attempts=0)
+            if resolved.kind == "replied":
+                return resolved.reply
+            cmd = resolved.value
         if cmd is None:
             return self._terminal_fallback(agent, world)
         return self._dispatch_command(agent, world, cmd)
@@ -221,40 +215,28 @@ class PlayTurnService:
         occ = self._new_occurrence(agent, defn, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, defn) or TurnResult.rejected("现在做不了这个。")
 
-    def _set_pending_clarification(self, agent: "Agent", original_text: str, kind: str, attempts: int) -> None:
-        from model.domain.agent import PendingClarification
-
-        apply_agent_diff(agent, AppliedDiff(
-            pending_clarification_set=PendingClarification(original_text=original_text, kind=kind, attempts=attempts)
-        ))
-
-    def _clear_pending_clarification(self, agent: "Agent") -> None:
-        if agent.pending_clarification is not None:
-            apply_agent_diff(agent, AppliedDiff(pending_clarification_set=None))
-
     def _resolve_clarification(self, agent: "Agent", world: "WorldView", raw: str) -> TurnResult:
         """追问回来的这句话，跟玩家最初那句拼在一起重新尝试创作——不重新走规则
         解析/向量兜底（那两层已经在第一次就试过判定不了了），直接回到失败的那
-        一层继续。成不成、要不要再问一次，都由 _resolve_command_outcome/
-        _resolve_location_outcome 统一处理（这两个函数在这里和"第一次就失败"
-        两条路径上共用，是同一套 3 次上限逻辑）。"""
+        一层继续。成不成、要不要再问一次，都由 LiveAuthoringCoordinator 里那套
+        统一的追问上限逻辑决定（跟"第一次就失败"走的是同一段代码）。"""
         pending = agent.pending_clarification
         combined = f"{pending.original_text}（补充：{raw}）"
         if pending.kind == "command":
-            outcome = self._author_live_command(agent, combined)
-            resolved = self._resolve_command_outcome(agent, outcome, combined, pending.attempts)
-            if isinstance(resolved, TurnResult):
-                return resolved
-            if resolved is None:
+            outcome = self.live_authoring.author_command(agent, combined)
+            resolved = self.live_authoring.resolve_command_outcome(agent, outcome, combined, pending.attempts)
+            if resolved.kind == "replied":
+                return resolved.reply
+            if resolved.kind == "failed":
                 return self._terminal_fallback(agent, world)
-            return self._dispatch_command(agent, world, resolved)
-        outcome = self._author_live_destination_outcome(agent, world, combined)
-        resolved = self._resolve_location_outcome(agent, world, outcome, combined, pending.attempts)
-        if isinstance(resolved, TurnResult):
-            return resolved
-        if resolved is None:
+            return self._dispatch_command(agent, world, resolved.value)
+        outcome = self.live_authoring.author_destination(agent, world, combined)
+        resolved = self.live_authoring.resolve_location_outcome(agent, world, outcome, combined, pending.attempts)
+        if resolved.kind == "replied":
+            return resolved.reply
+        if resolved.kind == "failed":
             return TurnResult.rejected(f"找不到「{combined}」这个地方。")
-        return self._complete_move(agent, world, resolved)
+        return self._complete_move(agent, world, resolved.value)
 
     def _terminal_fallback(self, agent: "Agent", world: "WorldView") -> TurnResult:
         """优化策略.md 的"终极兜底"原则：规则解析/向量意图/实时创作（含追问）
@@ -322,121 +304,19 @@ class PlayTurnService:
         self.events.save_event_def(patched)
         return patched
 
-    def _author_live_command(self, agent: "Agent", raw: str) -> LiveAuthorOutcome:
-        """规则解析 + 向量兜底都没命中——最后一层：实时调大模型判断这句话该
-        怎么办（LiveContentAuthor，README §1.12 的有意识例外，见
-        live_content_author.py 顶部说明）。没配置大模型/一个汉字都没有的纯乱码
-        直接判 reject，不走到大模型那一步（见 _looks_like_gibberish 的说明）。"""
-        if self._live_content_author is None or _looks_like_gibberish(raw):
-            return LiveAuthorOutcome(kind="reject")
-        return self._live_content_author.author_command_event(raw, agent.location_type)
-
-    def _resolve_command_outcome(
-        self, agent: "Agent", outcome: LiveAuthorOutcome, original_text: str, prior_attempts: int
-    ) -> "ParsedCommand | TurnResult | None":
-        """把 LiveAuthorOutcome 的三态落地：needs_clarification 挂起追问（最多真的
-        问出 3 次，第 4 次评估时还不够就放弃——attempts 记的是"已经问出去几次"，
-        不是"已经失败几次"，超过 3 才放弃，不是到 3 就放弃）、reject 交回调用方
-        原有的"听不懂"文案（返回 None）、ready 才真的校验+落库+返回可执行的
-        ParsedCommand。"""
-        if outcome.kind == "needs_clarification" and outcome.question:
-            attempts = prior_attempts + 1
-            if attempts > 3:
-                self._clear_pending_clarification(agent)
-                return None
-            self._set_pending_clarification(agent, original_text, "command", attempts)
-            return TurnResult(freeform_narrative=outcome.question)
-        self._clear_pending_clarification(agent)
-        if outcome.kind != "ready" or outcome.command_raw is None:
-            return None
-        event_id = "live_" + uuid.uuid4().hex[:10]
-        raw_event = {
-            **outcome.command_raw,
-            "event_id": event_id,
-            "applicable_locations": [agent.location_type],
-            "predicate": None,
-            "aliases": list(dict.fromkeys([*outcome.command_raw.get("aliases", []), original_text.strip()])),
-            # LiveContentAuthor 的 variants 是纯字符串列表，validate_event_def
-            # 要的是 {"text":..., "weight":...} 字典——跟 admin_controller.py::
-            # generate_events 里同样的转换。
-            "variants": [{"text": text, "weight": 1.0} for text in outcome.command_raw.get("variants", [])],
-            "is_draft": False,
-            "is_command": True,
-            # 实时创作没有专门的描述字段——管理员事后在编辑器里翻到这条 live_
-            # 开头的事件时，总不能只看到一个 id，拿第一条变体文案顶上。
-            "description": (outcome.command_raw.get("variants") or [""])[0],
-        }
-        # 只要 id 集合，走 published_event_ids() 而不是 load_event_defs(None)——
-        # 后者会把整个事件库反序列化一遍，而 live_ 事件只增不减，这里每处理一句
-        # 没听懂的话就要来一次，成本随对局时长线性上涨。语义不变：同样只认已发布
-        # 事件，不含草稿（list_all() 那种"含草稿"的读法对局路径依然不许用）。
-        catalog = ValidationCatalog(known_event_ids=self.events.published_event_ids())
-        defn, errors = validate_event_def(raw_event, catalog)
-        if defn is None:
-            _logger.warning("实时创作的事件没通过校验：%s", errors)
-            return None
-        # 跟 admin_controller.py::save_event 同样的 narrative_embedding 计算方式
-        # （tags+aliases+variants 拼接），不然这条实时创作的事件以后碰到相似但不
-        # 完全相同的措辞时，_match_command_by_intent 的向量兜底找不到它。
-        narrative_text = " ".join(
-            list(raw_event.get("tags") or [])
-            + list(raw_event.get("aliases") or [])
-            + [v["text"] for v in raw_event.get("variants") or []]
-        ).strip()
-        if narrative_text:
-            defn = replace(defn, narrative_embedding=embed_safely(self.embedding, narrative_text))
-        self.events.save_event_def(defn)
-        # 这个动作留了一个"当下还没兑现"的另一面影响——记下事件 id + 待触发结果，
-        # 等下一轮判断"故事线是否收尾"后再落地（PendingLiveResult 类注释/
-        # _maybe_conclude_live_result）。绝大多数事件没有这部分，什么都不用做。
-        deferred_pool = outcome.command_raw.get("deferred_result_pool") or []
-        if deferred_pool:
-            from model.domain.agent import PendingLiveResult
-
-            apply_agent_diff(agent, AppliedDiff(pending_live_result_set=PendingLiveResult(
-                event_id=defn.event_id,
-                deferred_result_pool=tuple(deferred_pool),
-                narrative_hint=(outcome.command_raw.get("variants") or [""])[0],
-            )))
-        return ParsedCommand(event_id=defn.event_id, location_hint=None, target=None, args={})
-
-    def _maybe_conclude_live_result(self, agent: "Agent", raw: str) -> None:
-        """PendingLiveResult 每轮问一次"玩家这句话算不算把伏笔翻篇了"：算，就把
-        攒着的 state_change 一次性落地、清挂起态，解除 execute_occurrence 里
-        "未结束不能抽下一个奇遇"的限制；连问 _LIVE_RESULT_MAX_WAIT_TURNS 轮都没
-        收尾（或者压根没配大模型没法判断），也强制落地——不能让一个伏笔永远悬着
-        把奇遇抽取锁死。这是纯副作用，不返回值，raw 本身接下来还要被正常解析。"""
-        pending = agent.pending_live_result
-        concluded = False
-        if self._live_content_author is not None:
-            concluded = self._live_content_author.check_storyline_concluded(pending.narrative_hint, raw)
-        attempts = pending.attempts + 1
-        if not concluded and attempts <= _LIVE_RESULT_MAX_WAIT_TURNS:
-            from model.domain.agent import PendingLiveResult
-
-            apply_agent_diff(agent, AppliedDiff(
-                pending_live_result_set=PendingLiveResult(
-                    event_id=pending.event_id,
-                    deferred_result_pool=pending.deferred_result_pool,
-                    narrative_hint=pending.narrative_hint,
-                    attempts=attempts,
-                )
-            ))
-            return
-        attr_deltas = tuple((item["field"], item["delta"]) for item in pending.deferred_result_pool)
-        apply_agent_diff(agent, AppliedDiff(attr_deltas=attr_deltas, pending_live_result_set=None))
-
     # ---------- 系统命令：move / retreat_start（GAME_DESIGN §3.1，非库内事件）----------
     def _handle_move(self, agent: "Agent", world: "WorldView", cmd) -> TurnResult:
         if agent.state.name != "idle":
             return TurnResult.rejected("现在走不开。")
         destination = world.find_location_by_name(cmd.location_hint) if cmd.location_hint else None
         if destination is None and cmd.location_hint:
-            outcome = self._author_live_destination_outcome(agent, world, cmd.location_hint)
-            resolved = self._resolve_location_outcome(agent, world, outcome, cmd.location_hint, prior_attempts=0)
-            if isinstance(resolved, TurnResult):
-                return resolved
-            destination = resolved
+            outcome = self.live_authoring.author_destination(agent, world, cmd.location_hint)
+            resolved = self.live_authoring.resolve_location_outcome(
+                agent, world, outcome, cmd.location_hint, prior_attempts=0
+            )
+            if resolved.kind == "replied":
+                return resolved.reply
+            destination = resolved.value
         if destination is None:
             hint = cmd.location_hint or "那里"
             return TurnResult.rejected(f"找不到「{hint}」这个地方。")
@@ -449,70 +329,6 @@ class PlayTurnService:
         )
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
         return self.execute_occurrence(agent, world, occ, synthetic) or TurnResult.rejected("现在做不了这个。")
-
-    def _author_live_destination_outcome(self, agent: "Agent", world: "WorldView", hint: str) -> LiveAuthorOutcome:
-        """`find_location_by_name` 找不到目的地时的最后一层兜底——实时创作一个新
-        地点（LiveContentAuthor，README §1.12 的有意识例外，见 live_content_author.py
-        顶部说明），带 list_locations 工具查真实地点数据（game_context_tools.py::
-        list_all_locations 的可见性过滤跟这里要的完全一样，直接复用，不再自己
-        内联一份）。"""
-        if self._live_content_author is None or _looks_like_gibberish(hint):
-            return LiveAuthorOutcome(kind="reject")
-        current_name = world.name_of(agent.location_id)
-        current_type = world.location_type_of(agent.location_id)
-        return self._live_content_author.author_location(
-            hint, current_name, current_type, lambda: list_all_locations(world)
-        )
-
-    def _resolve_location_outcome(
-        self, agent: "Agent", world: "WorldView", outcome: LiveAuthorOutcome, original_text: str, prior_attempts: int
-    ) -> "Location | TurnResult | None":
-        """把 LiveAuthorOutcome 的三态（外加"其实是已有地点"这个第四种情况）落地：
-        needs_clarification 挂起追问（满 3 次放弃，回落"找不到"）；reject 返回
-        None 交回调用方原有的"找不到"文案；ready 时——`existing_location_id` 命中
-        就直接返回那个已有 Location（不新建）；否则按 is_internal 新建子地点
-        （+ 一条连回当前地点的 Route，当场可达）或新建隐藏地点（不移动、告知
-        "尚未对外开放"）。
-
-        新地点/新路线直接写进 `world.mutable_state()`——不需要额外接线持久化：
-        `world` 是 ChatController 每回合传进来的同一个引用，回合结束后
-        ChatController 本来就会无条件 `world_repo.save(...)`（chat_controller.py），
-        这里改了内存里的 WorldState，会跟着这次回合一起整份存盘。"""
-        if outcome.kind == "needs_clarification" and outcome.question:
-            attempts = prior_attempts + 1  # 已经问出去几次，超过 3 才放弃（见 _resolve_command_outcome 的同款注释）
-            if attempts > 3:
-                self._clear_pending_clarification(agent)
-                return None
-            self._set_pending_clarification(agent, original_text, "location", attempts)
-            return TurnResult(freeform_narrative=outcome.question)
-        self._clear_pending_clarification(agent)
-        if outcome.kind != "ready":
-            return None
-        state = world.mutable_state()
-        if outcome.existing_location_id:
-            return state.locations.get(outcome.existing_location_id)
-        if outcome.location_decision is None:
-            return None
-        from model.domain.map import Location, LocationKind, Route
-
-        decision = outcome.location_decision
-        current = state.get(agent.location_id)
-        new_id = "loc_" + uuid.uuid4().hex[:10]
-        if decision.is_internal:
-            parent_id = current.parent_location_id if current is not None and current.parent_location_id else agent.location_id
-            new_location = Location(
-                location_id=new_id, name=decision.name, kind=LocationKind(decision.kind),
-                location_type=decision.location_type, parent_location_id=parent_id, hidden=False, discovered=True,
-            )
-            state.locations[new_id] = new_location
-            state.routes.append(Route(from_id=agent.location_id, to_id=new_id, bidirectional=True))
-            return new_location
-        new_location = Location(
-            location_id=new_id, name=decision.name, kind=LocationKind(decision.kind),
-            location_type=decision.location_type, parent_location_id=None, hidden=True, discovered=False,
-        )
-        state.locations[new_id] = new_location
-        return TurnResult.rejected(f"「{decision.name}」虽有耳闻，但眼下尚未对外开放，暂时去不了。")
 
     def _handle_retreat_start(self, agent: "Agent") -> TurnResult:
         if self.retreat is None or self.balance is None:
@@ -576,32 +392,23 @@ class PlayTurnService:
         agent.state = new_state
 
         if occ.trigger_source is TriggerSource.PLAYER and defn.needs_reply:
-            # 分支事件（LiveContentAuthor 的 reply_options，见 README 待补充章节）：
+            # 分支事件（LiveContentAuthor 的 reply_options，见 README §1.16）：
             # 只叙述、不结算——跟第二段奇遇 needs_reply 时完全同一套挂起机制
             # （pending_encounter_id + _try_resolve_pending/_resolve_reply_option），
-            # 这里是"第一段命令本身就是分支事件"这个新场景，直接复用而不是另起
-            # 一套。时间推进/事件历史记录都留到真正选中某个分支时才发生（同样
-            # 跟既有 _resolve_reply_option 的行为一致，不单独对这条路径加特殊
-            # 处理，避免两套 needs_reply 事件的时间语义不一致）。
+            # 这里是"第一段命令本身就是分支事件"这个新场景，直接复用而不是另起一套。
+            # 这里**不收时间**，之后玩家选哪个分支也不收——"分支不消耗时间"是明确的
+            # 产品决策，即整个分支型交互（叙述 + 选择）在游戏时间上是免费的，
+            # 见 _charge_time 的注释。
             self._park_encounter(agent, defn)
             agent.state = agent.state.settle(agent)
             variant = pick_variant(defn, agent.event_history, self.rng)
             return TurnResult().with_prompt(defn, variant)
 
-        ctx = PipelineContext(occ, defn, agent, world, chosen_variant=occ.chosen_variant_index)
-        ctx = self.pipeline.run(ctx)
+        ctx = self._run_pipeline(agent, world, occ, defn)
         if ctx.rejected:
             return TurnResult.rejected("条件未满足。")
-        # 时间推进：唯一来源是事件时长（README §1 回合驱动决策）
-        self.clock.advance_for(agent, defn.duration_shichen)
-        agent.event_history.record(
-            defn.event_id, occ.occurred_at, defn.tags, occ.chosen_variant_index,
-            exclusive_tags=defn.exclusive_tags, cooldown_shichen=defn.cooldown_shichen,
-        )
-        agent.state = agent.state.settle(agent)  # 不直接赋 IdleState()
-        self.bus.publish(AgentStateChanged(agent.agent_id, agent.state.name))
-        for spawned in ctx.spawned:  # 连锁：apply 落地后再投递
-            self.bus.publish(spawned)
+        self._charge_time(agent, occ, defn)  # 时间推进的唯一来源是事件时长（README §1）
+        self._settle_and_publish(agent, ctx, announce_state=True)
 
         first = TurnResult.from_one(defn, ctx)
         if ctx.stopped:
@@ -653,18 +460,59 @@ class PlayTurnService:
             return first.with_prompt(picked, pick_variant(picked, agent.event_history, self.rng))
 
         occ2 = self._new_occurrence(agent, picked, TriggerSource.ENCOUNTER)
-        ctx2 = self.pipeline.run(PipelineContext(occ2, picked, agent, world, chosen_variant=occ2.chosen_variant_index))
+        ctx2 = self._run_pipeline(agent, world, occ2, picked)
         if ctx2.rejected:
             return first
-        self.clock.advance_for(agent, picked.duration_shichen)
-        agent.event_history.record(
-            picked.event_id, occ2.occurred_at, picked.tags, occ2.chosen_variant_index,
-            exclusive_tags=picked.exclusive_tags, cooldown_shichen=picked.cooldown_shichen,
-        )
-        agent.state = agent.state.settle(agent)
-        for spawned in ctx2.spawned:
-            self.bus.publish(spawned)
+        self._charge_time(agent, occ2, picked)  # 奇遇是真的又发生了一件事，收时间
+        self._settle_and_publish(agent, ctx2, announce_state=False)
         return first.plus_encounter(picked, ctx2)
+
+    # ---------- 结算三件套：四条结算路径共用，差异只体现在"调不调 _charge_time" ----------
+    #
+    # 对局里有四条路径会跑结果池：主命令（execute_occurrence）、第二段奇遇
+    # （_second_stage）、分支选项（_resolve_reply_option）、流程图节点
+    # （_advance_scenario）。它们的骨架是同一套"跑责任链 → [推进时间] → 落状态 →
+    # 投递连锁"，以前四处各抄一遍。抽成下面三个小函数而不是一个带四个布尔开关的
+    # 大函数：开关版读起来比重复更糟，而拆成三个之后，**某条路径"少调了哪一个"
+    # 本身就是说明**——见 _charge_time 的注释。
+
+    def _run_pipeline(self, agent: "Agent", world: "WorldView", occ: GameEventOccurrence, defn: "GameEventDef"):
+        return self.pipeline.run(PipelineContext(occ, defn, agent, world, chosen_variant=occ.chosen_variant_index))
+
+    def _charge_time(self, agent: "Agent", occ: GameEventOccurrence, defn: "GameEventDef") -> None:
+        """推进游戏时间 + 记事件历史（冷却、互斥标签、新鲜度都靠它）。
+
+        **只有"真正发生了一件事"的路径调它**——主命令和第二段奇遇。分支选项
+        （_resolve_reply_option）和流程图节点（_advance_scenario）**故意不调**：
+        产品上已明确"分支不消耗时间"，玩家在一个已经发生的场景里做选择，是这件事
+        的一部分，不是又过了一个时辰。时长已经在宿主事件触发时收过一次了，选项
+        再收一次等于同一件事收两遍。
+
+        这不是疏漏，是决定；改之前请先确认产品意图（优化建议.md P1-3 记录了这次
+        决策，tests/model/services/test_branch_time_semantics.py 钉住了它）。
+
+        **已知副作用**：事件历史跟时间推进绑在同一个函数里，所以分支型事件
+        （needs_reply）同样不会被 record() ——它的 cooldown_shichen 和
+        max_trigger_per_agent 因此不生效，新鲜度衰减也不记账，同一条分支事件可以
+        被反复触发。这是"不计时"顺带的结果，不是单独决定过的；如果哪天需要"分支
+        免费、但仍然吃冷却"，把 record() 从这个函数里拆出去、在挂起时调用即可
+        （见优化建议.md P1-3 的说明）。"""
+        self.clock.advance_for(agent, defn.duration_shichen)
+        agent.event_history.record(
+            defn.event_id, occ.occurred_at, defn.tags, occ.chosen_variant_index,
+            exclusive_tags=defn.exclusive_tags, cooldown_shichen=defn.cooldown_shichen,
+        )
+
+    def _settle_and_publish(self, agent: "Agent", ctx, *, announce_state: bool) -> None:
+        """落状态机 + 投递连锁。announce_state 对应"这次状态变化要不要广播
+        AgentStateChanged"——主命令和分支选项是玩家主动行为的落点，要广播；第二段
+        奇遇和流程图节点挂在同一次玩家输入之内，状态最终由外层那次广播覆盖，
+        不重复发。"""
+        agent.state = agent.state.settle(agent)  # 不直接赋 IdleState()
+        if announce_state:
+            self.bus.publish(AgentStateChanged(agent.agent_id, agent.state.name))
+        for spawned in ctx.spawned:  # 连锁：apply 落地后再投递
+            self.bus.publish(spawned)
 
     # ---------- 挂起项结算 ----------
     def _try_resolve_pending(self, agent: "Agent", world: "WorldView", raw: str) -> TurnResult | None:
@@ -701,11 +549,15 @@ class PlayTurnService:
         option = pending_def.reply_options[option_index]
         synthetic = replace(pending_def, result_pool=option.results, predicate=None, reply_options=())
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
-        ctx = self.pipeline.run(PipelineContext(occ, synthetic, agent, world, chosen_variant=occ.chosen_variant_index))
+        ctx = self._run_pipeline(agent, world, occ, synthetic)
         self._clear_pending_encounter(agent)
+        # 注意这里**没有** _charge_time：分支不消耗时间（产品决策，见该函数注释）。
+        # 连锁事件的时间由它自己那次 execute_occurrence 负责，不在这里代收。
         agent.state = agent.state.settle(agent)
         self.bus.publish(AgentStateChanged(agent.agent_id, agent.state.name))
 
+        # 连锁要单独处理（不能直接用 _settle_and_publish）：第一条连锁是同步执行、
+        # 叙述要合并进本次回复的，其余才走总线。
         spawned_queue = list(ctx.spawned)
         if option.chain_event_id:
             chain_def = self.events.get_by_id(option.chain_event_id)
@@ -750,13 +602,15 @@ class PlayTurnService:
         )
         synthetic = replace(host_def, result_pool=next_node.results, predicate=None, reply_options=())
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
-        ctx = self.pipeline.run(PipelineContext(occ, synthetic, agent, world, chosen_variant=occ.chosen_variant_index))
+        ctx = self._run_pipeline(agent, world, occ, synthetic)
 
         # 推进到新节点：还有出边则继续挂起，否则清空 pending_scenario
         if graph.edges_from(next_node.node_id):
             agent.pending_scenario = replace(agent.pending_scenario, current_node_id=next_node.node_id)
         else:
             self._clear_pending_scenario(agent)
+        # 同样**没有** _charge_time：走流程图的一个节点也是"在已发生的场景里做选择"，
+        # 不另外计时（见 _charge_time 注释里的产品决策）。
         agent.state = agent.state.settle(agent)
         for spawned in ctx.spawned:
             self.bus.publish(spawned)

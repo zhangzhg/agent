@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from model.domain.events import GameEventDef
+from model.domain.events import LIVE_EVENT_ID_PREFIX, GameEventDef
 from model.repositories.codec import event_def_from_dict, event_def_to_dict
 
 
@@ -53,6 +53,34 @@ class SqliteEventRepository:
         rows = self._conn.execute("SELECT event_id FROM event_defs WHERE is_draft = 0")
         return {r[0] for r in rows}
 
+    def prune_live_events(self, keep: int, protected_ids: "set[str] | None" = None) -> int:
+        """把实时创作的事件（live_ 前缀）总数压回 keep 条以内，删最老的，返回删除
+        条数。手工/种子内容一律不碰。
+
+        为什么需要：每一句没被识别的玩家输入都会创作出一条永久事件，只增不减——
+        录入编辑器的列表会被玩家碎碎念淹没，向量兜底每回合装载的命令池也越滚越大。
+
+        按 rowid 排序当"最老"：live_ 事件的 id 是随机 uuid，本身没有顺序信息；这些
+        事件只在创作时 INSERT 一次、之后不会被 INSERT OR REPLACE 改写，所以 sqlite
+        的隐式 rowid 恰好就是创建顺序。
+
+        protected_ids 是"当前还被引用着、删了会留下悬空引用"的 id（挂起的奇遇、
+        待结算的延迟结果、流程图宿主事件，见调用方 play_turn.py）——宁可暂时超出
+        keep 一点，也不能把玩家正卡在上面的那条事件删掉。"""
+        protected = protected_ids or set()
+        rows = self._conn.execute(
+            "SELECT event_id FROM event_defs WHERE event_id LIKE ? ORDER BY rowid DESC",
+            (LIVE_EVENT_ID_PREFIX + "%",),
+        ).fetchall()
+        live_ids = [r[0] for r in rows]
+        # rowid DESC = 从新到旧；跳过前 keep 条（要留的），其余的老货里再排除受保护的。
+        doomed = [eid for eid in live_ids[keep:] if eid not in protected]
+        if not doomed:
+            return 0
+        self._conn.executemany("DELETE FROM event_defs WHERE event_id = ?", [(e,) for e in doomed])
+        self._conn.commit()
+        return len(doomed)
+
     def save_event_def(self, event: GameEventDef) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO event_defs (event_id, is_draft, payload) VALUES (?, ?, ?)",
@@ -89,6 +117,15 @@ class InMemoryEventRepository:
 
     def published_event_ids(self) -> set[str]:
         return {e.event_id for e in self._events.values() if not e.is_draft}
+
+    def prune_live_events(self, keep: int, protected_ids: "set[str] | None" = None) -> int:
+        """语义与 SqliteEventRepository 一致：dict 保插入顺序，等价于那边的 rowid。"""
+        protected = protected_ids or set()
+        live_ids = [e for e in self._events if e.startswith(LIVE_EVENT_ID_PREFIX)]
+        doomed = [eid for eid in live_ids[: max(0, len(live_ids) - keep)] if eid not in protected]
+        for eid in doomed:
+            del self._events[eid]
+        return len(doomed)
 
     def save_event_def(self, event: GameEventDef) -> None:
         self._events[event.event_id] = event
