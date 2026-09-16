@@ -7,11 +7,10 @@ from tests.helpers import make_agent
 
 
 class ApplyAgentDiffTests(unittest.TestCase):
-    def test_attr_deltas_accumulate(self):
-        agent = make_agent(money=10, satiety=50)
-        apply_agent_diff(agent, AppliedDiff(attr_deltas=(("money", -3.0), ("satiety", 5.0))))
-        self.assertEqual(agent.money, 7.0)
-        self.assertEqual(agent.satiety, 55.0)
+    def test_money_does_not_go_negative(self):
+        agent = make_agent(money=10)
+        apply_agent_diff(agent, AppliedDiff(attr_deltas=(("money", -40.0),)))
+        self.assertEqual(agent.money, 0)
 
     def test_items_and_flags(self):
         agent = make_agent()
@@ -79,6 +78,15 @@ class WorldDiffTests(unittest.TestCase):
         self.assertEqual(world.locations["loc1"].danger_level, 0.9)
         apply_world_diff(world, diff.invert())
         self.assertEqual(world.locations["loc1"].danger_level, 0.1)
+
+    def test_locations_and_routes_add(self):
+        world = WorldState()
+        loc = Location("new", "新地点", LocationKind.CITY, "城市")
+        from model.domain.map import Route
+
+        apply_world_diff(world, WorldDiff(locations_add=(loc,), routes_add=(Route("a", "new"),)))
+        self.assertIn("new", world.locations)
+        self.assertEqual(len(world.routes), 1)
 
 
 if __name__ == "__main__":

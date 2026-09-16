@@ -1,5 +1,5 @@
-"""controller/admin_controller.py — 录入编辑器 Web 入口（ARCHITECTURE §1.3.3 /
-GAME_DESIGN §9.3）。
+"""controller/admin_controller.py — 录入编辑器 Web 入口（README §1.3.3 /
+README §6.3）。
 
 薄：地图/物品是直接读写 app_ctx.world / app_ctx.items 的字典型仓库（内容录入，
 不是对局状态改动，不走 apply_agent_diff/apply_world_diff 那套 diff 机制——跟
@@ -69,7 +69,7 @@ def register_admin_routes(
 ) -> None:
     @fastapi_app.get("/admin", response_class=HTMLResponse)
     def admin_index(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse("admin.html", {"request": request})
+        return templates.TemplateResponse(request, "admin.html")
 
     # ---------- 地图 / 城市 ----------
 
@@ -245,7 +245,7 @@ def register_admin_routes(
             raw["predicate_embedding"] = []
         # tags+aliases+variants -> narrative_embedding：事件"在讲什么"的向量，跟
         # predicate_text 判的"条件是否成立"是两回事，不共用同一份向量（见
-        # 《向量化.md》"第二阶段：向量语义匹配"）。只用于对局里的软加权重排，不是
+        # README §1.4"第二阶段：向量语义匹配"）。只用于对局里的软加权重排，不是
         # 硬门槛，所以直接走三层兜底链，不用像 predicate_text 那样区分"没配置
         # embedding"——反正拿不到向量时 matching.py 那边会自然按中性乘子处理。
         narrative_text = " ".join(
@@ -363,7 +363,7 @@ def register_admin_routes(
         _refresh_parser_if_needed(app_ctx)
         return SaveEventResponse(ok=True, event_id=event_id)
 
-    # ---------- 模拟触发沙盒（ARCHITECTURE §1.3.3）----------
+    # ---------- 模拟触发沙盒（README §1.3.3）----------
 
     @fastapi_app.post("/api/admin/simulate", response_model=SimulateResponse)
     def simulate(request: SimulateRequest) -> SimulateResponse:

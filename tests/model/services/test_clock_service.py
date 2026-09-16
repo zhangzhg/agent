@@ -14,7 +14,7 @@ class RetreatServiceTests(unittest.TestCase):
         agent = make_agent(lifespan_left=80.0, cultivation=0.0)
         world = make_world()
 
-        results = retreat.run(agent, world, target_shichen=24)  # 2 天，闭关 100 年 = 寿元 -100 的折算
+        results = retreat.run(agent, world, target_shichen=24)  # 2 天；寿元按年折算（4320 时辰/年）
 
         total_spent = sum(r.lifespan_spent for r in results)
         self.assertAlmostEqual(agent.lifespan_left, 80.0 - total_spent, places=6)
@@ -39,13 +39,24 @@ class RetreatServiceTests(unittest.TestCase):
     def test_lifespan_exhausted_interrupts_immediately(self):
         clock = GameClock(start=make_time())
         retreat = RetreatService(clock, make_balance(), random.Random(1))
-        agent = make_agent(lifespan_left=0.5)  # 不到一批就耗尽
+        agent = make_agent(lifespan_left=0.002)  # 不到一年就耗尽
         world = make_world()
 
-        results = retreat.run(agent, world, target_shichen=1200)
+        from model.domain.time import SHICHEN_PER_YEAR
+
+        results = retreat.run(agent, world, target_shichen=SHICHEN_PER_YEAR)
 
         self.assertTrue(results[-1].interrupted_by_force)
         self.assertEqual(results[-1].force_reason, "寿元耗尽")
+
+    def test_advance_for_consumes_lifespan_and_grows_age(self):
+        clock = GameClock(start=make_time(year=100))
+        agent = make_agent(age=6, lifespan_left=80.0)
+        from model.domain.time import SHICHEN_PER_YEAR
+
+        clock.advance_for(agent, SHICHEN_PER_YEAR)
+        self.assertEqual(agent.age, 7)
+        self.assertAlmostEqual(agent.lifespan_left, 79.0, places=5)
 
     def test_settle_leaves_closed_door_when_no_pending(self):
         clock = GameClock(start=make_time())

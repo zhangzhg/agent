@@ -13,6 +13,7 @@ from functools import total_ordering
 SHICHEN_PER_DAY = 12
 DAYS_PER_MONTH = 30
 MONTHS_PER_YEAR = 12
+SHICHEN_PER_YEAR = SHICHEN_PER_DAY * DAYS_PER_MONTH * MONTHS_PER_YEAR  # 4320
 SHICHEN_NAMES = ("子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥")
 
 _HEAVENLY_STEMS = ("甲", "乙", "丙", "丁", "戊", "己", "庚", "辛", "壬", "癸")
@@ -41,29 +42,28 @@ class GameTime:
     day: int
     shichen: int  # 0-11
 
-    def _ordinal(self) -> int:
+    def ordinal(self) -> int:
+        """自 year=0 起累计的时辰数。存档只写这个整数，读档用 from_ordinal 还原。"""
         return (
             ((self.year * MONTHS_PER_YEAR + (self.month - 1)) * DAYS_PER_MONTH + (self.day - 1))
             * SHICHEN_PER_DAY
             + self.shichen
         )
 
-    def __lt__(self, other: "GameTime") -> bool:
-        if not isinstance(other, GameTime):
-            return NotImplemented
-        return self._ordinal() < other._ordinal()
+    def _ordinal(self) -> int:
+        return self.ordinal()
 
-    def add_shichen(self, n: int) -> "GameTime":
-        """推进（或倒退）n 个时辰；跨日/月/年自动进位，年变动时重算干支。"""
-        total = self._ordinal() + n
-        shichen = total % SHICHEN_PER_DAY
-        total_days = total // SHICHEN_PER_DAY
+    @classmethod
+    def from_ordinal(cls, n: int, epoch: Epoch = Epoch.TAIYI) -> "GameTime":
+        """ordinal() 的逆：纯算术，不查表。epoch 缺省太乙历（目前唯一纪元）。"""
+        shichen = n % SHICHEN_PER_DAY
+        total_days = n // SHICHEN_PER_DAY
         day = total_days % DAYS_PER_MONTH
         total_months = total_days // DAYS_PER_MONTH
         month = total_months % MONTHS_PER_YEAR
         year = total_months // MONTHS_PER_YEAR
-        return GameTime(
-            epoch=self.epoch,
+        return cls(
+            epoch=epoch,
             year=year,
             ganzhi=ganzhi_for_year(year),
             month=month + 1,
@@ -71,9 +71,18 @@ class GameTime:
             shichen=shichen,
         )
 
+    def __lt__(self, other: "GameTime") -> bool:
+        if not isinstance(other, GameTime):
+            return NotImplemented
+        return self.ordinal() < other.ordinal()
+
+    def add_shichen(self, n: int) -> "GameTime":
+        """推进（或倒退）n 个时辰；跨日/月/年自动进位，年变动时重算干支。"""
+        return GameTime.from_ordinal(self.ordinal() + n, self.epoch)
+
     def shichen_until(self, other: "GameTime") -> int:
         """other 相对 self 经过的时辰数（可为负），供闭关/离线时长换算。"""
-        return other._ordinal() - self._ordinal()
+        return other.ordinal() - self.ordinal()
 
     @staticmethod
     def new(epoch: Epoch, year: int, month: int, day: int, shichen: int) -> "GameTime":

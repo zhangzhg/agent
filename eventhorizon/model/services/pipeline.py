@@ -78,7 +78,7 @@ class LogStep:
         if ctx.rejected:
             return
         ctx.occurrence.applied_diff = ctx.diff
-        ctx.occurrence.world_diff = ctx.world_diff if ctx.world_diff.location_changes else None
+        ctx.occurrence.world_diff = None if ctx.world_diff.is_empty() else ctx.world_diff
         ctx.occurrence.chosen_variant_index = ctx.chosen_variant
         if self._log is not None:
             self._log.append(ctx.occurrence)

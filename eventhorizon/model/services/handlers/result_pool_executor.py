@@ -1,12 +1,12 @@
 """model/services/handlers/result_pool_executor.py — Result 联合类型的唯一分发点
-（对应 README 3.2 / 3.3.2，数值公式对应 GAME_DESIGN §7.2 / 7.3）。
+（对应 README 3.2 / 3.3.2，数值公式对应 README §3.7 / 7.3）。
 
 把每条 Result 翻译成 diff 片段累加进 ctx.diff / ctx.world_diff，自己不改 Agent。
 Check 从 BalanceTable 读系数、用注入的 rng 掷点，再展开对应分支的 Result。
 ChainEvent 只往 ctx.spawned 追加 Occurrence，不在本链继续展开。
 
-P(突破) = clamp(资质×灵气浓度×丹药加成 − 心魔 − 境界惩罚, 0.05, 0.95)（GAME_DESIGN §7.2）。
-P(胜) = clamp(境界差 + 道具 + 运势 − 心魔, 0.05, 0.95)（GAME_DESIGN §7.3，装备系统未实现，
+P(突破) = clamp(资质×灵气浓度×丹药加成 − 心魔 − 境界惩罚, 0.05, 0.95)（README §3.7）。
+P(胜) = clamp(境界差 + 道具 + 运势 − 心魔, 0.05, 0.95)（README §3.7，装备系统未实现，
 道具项恒为 0，是已知的范围限制）。修为回退比例与"连续失败触发走火入魔"是跨事件的
 计数器行为（Agent.consecutive_breakthrough_failures），content 侧的 on_fail 只管
 心魔上升这类可以静态配置的后果，运行时状态相关的部分留在这里。
@@ -87,7 +87,7 @@ class ResultPoolExecutor:
 
     def _state_change_diff(self, result: StateChange, ctx: "PipelineContext") -> AppliedDiff:
         if result.field == "scene_focus" and result.set_to is not None:
-            # scene_focus 供代词解析回填（ChatParser「它/这个」、GAME_DESIGN §3.1），
+            # scene_focus 供代词解析回填（ChatParser「它/这个」、README §3.3），
             # 一步过期不清空，允许多轮指代。
             return AppliedDiff(scene_focus_set=str(result.set_to))
         if result.field in _SET_TO_FIELDS and result.set_to is not None:
@@ -142,7 +142,7 @@ class ResultPoolExecutor:
         return 0.5
 
     def _breakthrough_probability(self, ctx: "PipelineContext") -> float:
-        """GAME_DESIGN §7.2：P = clamp(资质×灵气浓度×丹药加成 − 心魔 − 境界惩罚, 0.05, 0.95)。"""
+        """README §3.7：P = clamp(资质×灵气浓度×丹药加成 − 心魔 − 境界惩罚, 0.05, 0.95)。"""
         cfg = self._balance.breakthrough
         qi = ctx.world.qi_density_of(ctx.agent.location_id) if ctx.world is not None else 1.0
         realm_order = self._balance.realm_order
@@ -152,7 +152,7 @@ class ResultPoolExecutor:
         return clamp(score, cfg["clamp_min"], cfg["clamp_max"])
 
     def _combat_probability(self, ctx: "PipelineContext", opponent_realm_rank: int | None = None) -> float:
-        """GAME_DESIGN §7.3：P(胜) = clamp(境界差 + 道具 + 运势 − 心魔, 0.05, 0.95)。
+        """README §3.7：P(胜) = clamp(境界差 + 道具 + 运势 − 心魔, 0.05, 0.95)。
         opponent_realm_rank 未提供时按同境界处理（无装备/对手建模，已知范围限制）。"""
         cfg = self._balance.combat
         realm_order = self._balance.realm_order
@@ -180,7 +180,7 @@ class ResultPoolExecutor:
         return (ctx.agent.consecutive_breakthrough_failures + 1) >= threshold
 
     def _spawn_qi_deviation(self, ctx: "PipelineContext") -> None:
-        """极端失败 chain 走火入魔（README 1.3.2 / GAME_DESIGN §7.2）：force 级，
+        """极端失败 chain 走火入魔（README 1.3.2 / README §3.7）：force 级，
         event_id 由 BalanceTable 配置，默认约定 "qi_deviation"（content 侧需定义同名事件）。"""
         event_id = self._balance.breakthrough.get("qi_deviation_event_id", "qi_deviation")
         ctx.spawned.append(

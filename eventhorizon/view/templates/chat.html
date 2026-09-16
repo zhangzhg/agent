@@ -16,6 +16,9 @@
     font-size: 15px;
   }
   header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     padding: 14px 20px;
     border-bottom: 1px solid var(--border);
     font-weight: 700;
@@ -24,6 +27,14 @@
     background: var(--sidebar-bg);
     box-shadow: var(--shadow-sm);
   }
+  header .title { flex: 1; }
+  #header-agent {
+    color: var(--text-dim);
+    font-weight: 500;
+    letter-spacing: 0;
+    font-size: 13px;
+  }
+  #logout-btn { margin: 0; padding: 5px 12px; font-size: 13px; }
   #layout {
     flex: 1;
     display: flex;
@@ -115,12 +126,16 @@
 </style>
 </head>
 <body>
-  <header>太一仙途</header>
+  <header>
+    <span class="title">太一仙途</span>
+    <span id="header-agent" hidden></span>
+    <button type="button" id="logout-btn" class="btn secondary" hidden>退出</button>
+  </header>
   <div id="layout">
     <div id="main">
       <div id="log"></div>
       <div id="input-bar">
-        <input id="text-input" type="text" placeholder="输入你想做什么…" autocomplete="off" />
+        <input id="text-input" type="text" placeholder="请选择 1 或 2" autocomplete="off" />
         <button id="send-btn">发送</button>
       </div>
     </div>
@@ -132,11 +147,22 @@
   </div>
 
 <script>
-const AGENT_ID = new URLSearchParams(location.search).get("agent") || "player";
+const STORAGE_AGENT = "eh_agent_id";
+const STORAGE_CODE = "eh_verify_code";
+const MENU = "请选择：\n1) 建立人物\n2) 进入游戏";
+const ASK_ACCOUNT = "请输入人物账号。";
+const ASK_CODE = "请输入验证码。";
 
 const log = document.getElementById("log");
 const input = document.getElementById("text-input");
 const sendBtn = document.getElementById("send-btn");
+const headerAgent = document.getElementById("header-agent");
+const logoutBtn = document.getElementById("logout-btn");
+
+let agentId = "";
+let verifyCode = "";
+let pendingAccount = "";
+let authPhase = "menu";
 
 function appendBubble(text, cls) {
   const div = document.createElement("div");
@@ -177,25 +203,174 @@ function updateSidebar(sidebar) {
     `<div class="row"><span class="label">背包</span><span>${ch.inventory_count}</span></div>`;
 }
 
-async function loadSession() {
-  const res = await fetch(`/api/session?agent_id=${encodeURIComponent(AGENT_ID)}`);
-  const data = await res.json();
+function setPlayUi(playing) {
+  headerAgent.hidden = !playing;
+  logoutBtn.hidden = !playing;
+  headerAgent.textContent = playing ? agentId : "";
+  if (playing) {
+    input.type = "text";
+    input.placeholder = "输入你想做什么…";
+    input.autocomplete = "off";
+  }
+}
+
+function setAuthInput(phase) {
+  authPhase = phase;
+  input.type = "text";
+  input.autocomplete = "off";
+  if (phase === "menu") {
+    input.placeholder = "请选择 1 或 2";
+  } else if (phase === "enter_password") {
+    input.type = "password";
+    input.placeholder = "验证码";
+    input.autocomplete = "current-password";
+  } else {
+    input.placeholder = "人物账号";
+    input.autocomplete = "username";
+  }
+}
+
+function promptMenu(extra) {
+  pendingAccount = "";
+  verifyCode = "";
+  agentId = "";
+  setPlayUi(false);
+  setAuthInput("menu");
+  appendBubble(extra ? extra + "\n\n" + MENU : MENU, "system");
+  input.focus();
+}
+
+async function readError(res) {
+  const data = await res.json().catch(() => ({}));
+  if (typeof data.detail === "string") return data.detail;
+  return "请求失败。";
+}
+
+function persistCredentials(id, code) {
+  agentId = id;
+  verifyCode = code;
+  sessionStorage.setItem(STORAGE_AGENT, id);
+  sessionStorage.setItem(STORAGE_CODE, code);
+}
+
+function clearCredentials() {
+  agentId = "";
+  verifyCode = "";
+  pendingAccount = "";
+  sessionStorage.removeItem(STORAGE_AGENT);
+  sessionStorage.removeItem(STORAGE_CODE);
+  setPlayUi(false);
+  log.replaceChildren();
+  promptMenu();
+}
+
+function enterGame(data) {
+  authPhase = "play";
+  setPlayUi(true);
+  log.replaceChildren();
   if (data.narrative) appendBubble(data.narrative, "narrative");
   updateSidebar(data.sidebar);
+  input.focus();
+}
+
+async function loadSession(id, code) {
+  const res = await fetch("/api/session", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: id, verify_code: code }),
+  });
+  if (!res.ok) {
+    throw new Error(await readError(res));
+  }
+  persistCredentials(id, code);
+  enterGame(await res.json());
+}
+
+async function createCharacter(id) {
+  const res = await fetch("/api/character", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_id: id }),
+  });
+  if (!res.ok) {
+    throw new Error(await readError(res));
+  }
+  return res.json();
+}
+
+async function handleAuthInput(text) {
+  if (authPhase === "menu") {
+    if (text === "1" || text === "建立人物") {
+      setAuthInput("create_id");
+      appendBubble(ASK_ACCOUNT, "system");
+      return;
+    }
+    if (text === "2" || text === "进入游戏") {
+      setAuthInput("enter_id");
+      appendBubble(ASK_ACCOUNT, "system");
+      return;
+    }
+    appendBubble("请选择 1 或 2。", "system");
+    return;
+  }
+
+  if (authPhase === "create_id") {
+    const data = await createCharacter(text);
+    appendBubble(`人物已建立。验证码是 ${data.verify_code}（只显示一次，请抄下）。`, "system");
+    await loadSession(data.agent_id, data.verify_code);
+    return;
+  }
+
+  if (authPhase === "enter_id") {
+    pendingAccount = text;
+    setAuthInput("enter_password");
+    appendBubble(ASK_CODE, "system");
+    return;
+  }
+
+  if (authPhase === "enter_password") {
+    try {
+      await loadSession(pendingAccount, text);
+    } catch (err) {
+      appendBubble(err.message, "system");
+      promptMenu();
+    }
+  }
 }
 
 async function sendMessage() {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
-  appendBubble(text, "user");
+  if (authPhase === "enter_password") {
+    appendBubble("••••••", "user");
+  } else {
+    appendBubble(text, "user");
+  }
+  if (authPhase !== "play") {
+    sendBtn.disabled = true;
+    try {
+      await handleAuthInput(text);
+    } catch (err) {
+      appendBubble(err.message, "system");
+    } finally {
+      sendBtn.disabled = false;
+      input.focus();
+    }
+    return;
+  }
   sendBtn.disabled = true;
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent_id: AGENT_ID, text }),
+      body: JSON.stringify({ agent_id: agentId, verify_code: verifyCode, text }),
     });
+    if (res.status === 401) {
+      appendBubble(await readError(res), "system");
+      clearCredentials();
+      return;
+    }
     const data = await res.json();
     const isSystem = Boolean(data.parse_error || data.reject_reason);
     appendBubble(data.narrative, isSystem ? "system" : "narrative");
@@ -209,12 +384,28 @@ async function sendMessage() {
   }
 }
 
+logoutBtn.addEventListener("click", clearCredentials);
 sendBtn.addEventListener("click", sendMessage);
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendMessage();
 });
 
-loadSession();
+(async function boot() {
+  const savedId = sessionStorage.getItem(STORAGE_AGENT);
+  const savedCode = sessionStorage.getItem(STORAGE_CODE);
+  if (savedId && savedCode) {
+    try {
+      await loadSession(savedId, savedCode);
+      return;
+    } catch (err) {
+      sessionStorage.removeItem(STORAGE_AGENT);
+      sessionStorage.removeItem(STORAGE_CODE);
+      promptMenu(err.message);
+      return;
+    }
+  }
+  promptMenu();
+})();
 </script>
 </body>
 </html>

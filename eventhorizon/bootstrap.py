@@ -10,6 +10,7 @@ from __future__ import annotations
 import random
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 from model.domain.balance import BalanceTable
 from model.domain.map import WorldState
@@ -24,7 +25,9 @@ from model.repositories.world_repository import SqliteWorldRepository
 from model.services.arbiter import EventArbiter
 from model.services.chat_parser import ChatParser
 from model.services.clock_service import GameClock, RetreatService
+from model.services.character_service import CharacterService
 from model.services.death_service import DeathService
+from model.repositories.character_repository import SqliteCharacterRepository
 from model.services.event_bus import InProcessEventBus
 from model.services.handlers.death_handler import DeathHandler
 from model.services.handlers.game_event_handler import GameEventHandler
@@ -36,6 +39,8 @@ from model.services.play_turn import PlayTurnService
 from model.services.live_narrative_writer import LlmClient
 from model.services.ports import EmbeddingPort
 from model.services.schedule_service import ScheduleService
+
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "eventhorizon.db"
 
 
 @dataclass
@@ -68,6 +73,7 @@ class AppContext:
     balance: BalanceTable
     schedule_service: ScheduleService
     rng: random.Random
+    character_service: CharacterService
 
 
 def build_app(
@@ -99,6 +105,7 @@ def build_app(
     # 用它当 at 会导致 replay_since 把历史重放到失真）。
     agent_repo = SqliteAgentRepository(snapshots, logs, now_provider=clock.now)
     world_repo = SqliteWorldRepository(snapshots)
+    character_repo = SqliteCharacterRepository(conn)
 
     executor = ResultPoolExecutor(balance=balance, rng=rng, scenarios=scenarios)
     handler = GameEventHandler(executor)
@@ -106,10 +113,12 @@ def build_app(
     parser = _build_chat_parser(events)
     arbiter = EventArbiter()
     retreat = RetreatService(clock, balance, rng, log=logs)
+    death_service = DeathService()
 
     play_turn = PlayTurnService(
         bus, arbiter, pipeline, parser, events, scenarios, rng, logs, clock,
         retreat=retreat, balance=balance, embedding=embedding, narrative_writer=narrative_writer,
+        death_service=death_service, npc_provider=lambda: [a for a in agent_repo.list_all() if a.is_npc],
     )
 
     world_view = world_repo.assemble_view()
@@ -134,10 +143,18 @@ def build_app(
         ).handle,
     )
 
-    death_service = DeathService()
     bus.subscribe(DeathEvent, DeathHandler(death_service, agent_repo).handle)
 
     play_turn.bind_context(world_repo.assemble_view, agent_repo.load)
+
+    from content.session import spawn_player_agent
+
+    character_service = CharacterService(
+        character_repo,
+        agent_repo,
+        create_agent=lambda agent_id: spawn_player_agent(agent_repo, world_state, clock, agent_id),
+        rng=rng,
+    )
 
     return AppContext(
         conn=conn,
@@ -155,6 +172,7 @@ def build_app(
         balance=balance,
         schedule_service=schedule_service,
         rng=rng,
+        character_service=character_service,
     )
 
 

@@ -75,7 +75,7 @@ def make_play_turn(
     embedding=None, narrative_writer=None,
 ):
     """按 bootstrap.py 同样的接线方式，只是用测试用的内存仓库/固定 rng，方便
-    §9 测试策略里"内存假仓库 + 固定 rng"的写法。"""
+    README §5 测试策略里"内存假仓库 + 固定 rng"的写法。"""
     from model.services.arbiter import EventArbiter
     from model.services.chat_parser import ChatParser
     from model.services.clock_service import GameClock
@@ -100,5 +100,5 @@ def make_play_turn(
         parser = ChatParser(alias_map)
     return PlayTurnService(
         bus, EventArbiter(), pipeline, parser, events, scenarios, rng, log, clock,
-        embedding=embedding, narrative_writer=narrative_writer,
+        balance=balance, embedding=embedding, narrative_writer=narrative_writer,
     )

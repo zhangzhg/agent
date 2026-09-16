@@ -21,7 +21,7 @@ class PredicateType(str, Enum):
     FLAG = "flag"
     LOCATION_TYPE = "location_type"
     HAS_CAUSE = "has_cause"
-    LUCK_GTE = "luck_gte"  # 隐藏谓词（GAME_DESIGN §7.5）：运势影响奇遇粗筛通过率，
+    LUCK_GTE = "luck_gte"  # 隐藏谓词（README §3.7）：运势影响奇遇粗筛通过率，
     # 不进 README 公开谓词白名单，只供系统内置事件使用——event_validation.py 的
     # 编辑器/大模型录入校验会拒绝它，杜绝策划把"运势"当成可任意拼装的谓词滥用。
 

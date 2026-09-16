@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from model.domain.map import WorldView
     from model.domain.scenario import ScenarioGraph
     from model.domain.time import GameTime
+    from model.repositories.character_repository import CharacterRecord
 
 
 class AgentRepository(Protocol):
@@ -26,8 +27,9 @@ class AgentRepository(Protocol):
     def save(self, agent: "Agent") -> None: ...
     def list_all(self) -> "list[Agent]":
         """schedule_service 的 agents_provider 用它筛选 is_npc 的 Agent 做日程巡检
-        （README 1.5.2）；单存档下"全部 Agent"就是最近快照里 agents 字典的全部键，
-        跟 load() 一样按各自的增量日志重放到当前时刻。"""
+        （README 1.5.2）；同一世界库里可有多名玩家人物与 NPC，玩家进游戏须人物 id
+        + 验证码（见 CharacterRepository）。"全部 Agent"就是最近快照里 agents 字典
+        的全部键，跟 load() 一样按各自的增量日志重放到当前时刻。"""
         ...
 
 
@@ -42,7 +44,7 @@ class WorldRepository(Protocol):
 
 
 class ItemRepository(Protocol):
-    """背包面板"点击查看物品描述"用（GAME_DESIGN §2.6）。README/ARCHITECTURE 没有
+    """背包面板"点击查看物品描述"用（README §3.2）。设计文档没有
     单列物品仓库端口——物品之前只作为 item_id 字符串出现在 Result / ValidationCatalog
     里；这里补上最小的读接口，不引入独立的物品录入流程。"""
 
@@ -77,6 +79,14 @@ class SnapshotStore(Protocol):
 class EventLogStore(Protocol):
     def append(self, occurrence: "GameEventOccurrence") -> None: ...
     def replay_since(self, since: "GameTime") -> list["GameEventOccurrence"]: ...
+
+
+class CharacterRepository(Protocol):
+    """玩家人物身份（人物 id + 验证码哈希）与事件快照墙钟时间。NPC 不进这张表。"""
+
+    def create(self, record: "CharacterRecord") -> None: ...
+    def get(self, agent_id: str) -> "CharacterRecord | None": ...
+    def touch_event_saved_at(self, agent_id: str, saved_at: float) -> None: ...
 
 
 class EmbeddingPort(Protocol):

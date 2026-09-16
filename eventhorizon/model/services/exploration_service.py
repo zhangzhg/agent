@@ -1,5 +1,4 @@
-"""model/services/exploration_service.py — 神识扫描等只读探索命令（GAME_DESIGN
-§5.3）。
+"""model/services/exploration_service.py — 神识扫描等只读探索命令（README §3.6）。
 
 inspect 类只读命令：不消耗回合、不进 AgentEventHistory。命中隐藏点位的概率由地点
 的"隐蔽度"属性决定（策划配置，示意 15%~40%）；未命中给一句烘托叙述而非"无事发生"

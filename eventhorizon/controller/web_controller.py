@@ -1,5 +1,4 @@
-"""controller/web_controller.py — FastAPI 入口（GAME_DESIGN §2 的 Web 版，
-ARCHITECTURE §10："V1+ 需要真正的聊天前端时，建议 FastAPI"）。
+"""controller/web_controller.py — FastAPI 入口（README §3.2 / §5）。
 
 薄：只做 HTTP 请求/响应的编解码，业务全部委派给 ChatController（跟
 chat_controller.py 是同一个类，CLI 和 Web 两个入口共用）。不直调
@@ -11,13 +10,12 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from bootstrap import build_app
+from bootstrap import DEFAULT_DB_PATH, build_app
 from content.seed import seed_all
-from content.session import ensure_seed_agent
 from controller.admin_controller import register_admin_routes
 from controller.chat_controller import ChatController
 from model.repositories.llm.llm_config import load_llm_config
@@ -28,10 +26,19 @@ from model.repositories.llm.llm_result_text_parser import LlmResultTextParser
 from model.repositories.llm.openai_compatible_client import OpenAiCompatibleClient
 from model.services.local_embedding import FallbackEmbeddingClient
 from model.services.world_query_assistant import WorldQueryAssistant
+from model.services.character_service import (
+    EVENT_EXPIRED_NARRATIVE,
+    CharacterAuthError,
+    CharacterExistsError,
+    InvalidAgentIdError,
+)
 from view.schemas.web_schemas import (
     CalendarPanelDTO,
     ChatApiRequest,
     ChatApiResponse,
+    CharacterCreateRequest,
+    CharacterCreateResponse,
+    CharacterEnterRequest,
     CharacterPanelDTO,
     LocationPanelDTO,
     SidebarDTO,
@@ -44,9 +51,7 @@ if TYPE_CHECKING:
 # 网页版默认落一个真的 sqlite 文件（bootstrap.build_app() 自己的默认值是
 # ":memory:"，那是给测试用的，测试要的就是每次都从空白状态开始，互不污染）——
 # 录入编辑器存的地图/物品/事件是要长期攒的内容，进程一重启就清空说不过去。
-# 路径按这个文件的位置算，不依赖当前工作目录（start.sh 会先 cd 到 eventhorizon/，
-# 但直接用相对路径不如算绝对路径稳）；EVENTHORIZON_DB_PATH 可以整个覆盖掉。
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "eventhorizon.db"
+# 路径在 bootstrap.DEFAULT_DB_PATH；EVENTHORIZON_DB_PATH 可以整个覆盖掉。
 
 
 def create_app(db_path: str | None = None) -> FastAPI:
@@ -78,6 +83,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
     controller = ChatController(
         app_ctx.agent_repo, app_ctx.world_repo, app_ctx.play_turn, app_ctx.events,
         rng=app_ctx.rng, world_query=world_query,
+        characters=app_ctx.character_service,
     )
 
     fastapi_app = FastAPI(title="太一仙途")
@@ -85,27 +91,39 @@ def create_app(db_path: str | None = None) -> FastAPI:
 
     @fastapi_app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
-        return templates.TemplateResponse("chat.html", {"request": request})
+        return templates.TemplateResponse(request, "chat.html")
 
-    @fastapi_app.get("/api/session", response_model=ChatApiResponse)
-    def session(agent_id: str = Query(default="player")) -> ChatApiResponse:
-        """页面首次加载 / 刷新时调用：新会话给一句开局叙述（GAME_DESIGN §1.1），
-        老会话只回当前状态栏，不重复播报开场白。"""
-        agent = ensure_seed_agent(app_ctx, agent_id)
-        narrative = ""
+    @fastapi_app.post("/api/character", response_model=CharacterCreateResponse)
+    def create_character(request: CharacterCreateRequest) -> CharacterCreateResponse:
+        try:
+            created = app_ctx.character_service.create(request.agent_id)
+        except InvalidAgentIdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CharacterExistsError:
+            raise HTTPException(status_code=409, detail="这个人物 id 已经有人用了。") from None
+        return CharacterCreateResponse(agent_id=created.agent_id, verify_code=created.verify_code)
+
+    @fastapi_app.post("/api/session", response_model=ChatApiResponse)
+    def session(request: CharacterEnterRequest) -> ChatApiResponse:
+        """进入游戏：校验人物 id + 验证码；事件快照超过三天则清任务挂起、保留修为行囊。"""
+        agent, event_expired = _enter_character(app_ctx, request.agent_id, request.verify_code)
+        parts: list[str] = []
+        if event_expired:
+            parts.append(EVENT_EXPIRED_NARRATIVE)
         if agent.turn_count == 0:
             from content.onboarding import OPENING_NARRATIVE
 
-            narrative = OPENING_NARRATIVE
+            parts.append(OPENING_NARRATIVE)
         return ChatApiResponse(
-            narrative=narrative,
+            narrative="\n\n".join(parts),
             agent_state=agent.state.name,
-            sidebar=_build_sidebar(app_ctx, agent_id),
+            sidebar=_build_sidebar(app_ctx, agent.agent_id),
+            event_expired=event_expired,
         )
 
     @fastapi_app.post("/api/chat", response_model=ChatApiResponse)
     def chat(request: ChatApiRequest) -> ChatApiResponse:
-        ensure_seed_agent(app_ctx, request.agent_id)
+        _authenticate(app_ctx, request.agent_id, request.verify_code)
         response = controller.on_player_message(request.text, request.agent_id)
         return ChatApiResponse(
             narrative=response.narrative,
@@ -123,9 +141,30 @@ def create_app(db_path: str | None = None) -> FastAPI:
     register_admin_routes(
         fastapi_app, app_ctx, llm_location_author, llm_item_author, llm_event_flavor_author,
         embedding_client, llm_result_text_parser,
-    )  # /admin + /api/admin/*（ARCHITECTURE §1.3.3）
+    )  # /admin + /api/admin/*（README §1.3.3）
 
     return fastapi_app
+
+
+def _authenticate(app_ctx: "AppContext", agent_id: str, verify_code: str) -> None:
+    try:
+        app_ctx.character_service.authenticate(agent_id, verify_code)
+    except InvalidAgentIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CharacterAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+def _enter_character(app_ctx: "AppContext", agent_id: str, verify_code: str):
+    try:
+        entered = app_ctx.character_service.enter(agent_id, verify_code)
+    except InvalidAgentIdError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except CharacterAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=401, detail="人物 id 或验证码不对。") from exc
+    return entered.agent, entered.event_expired
 
 
 def _build_sidebar(app_ctx: "AppContext", agent_id: str) -> SidebarDTO:

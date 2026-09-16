@@ -1,10 +1,10 @@
-"""controller/chat_controller.py — 薄入口（对应 README §7 / GAME_DESIGN §3.1）。
+"""controller/chat_controller.py — 薄入口（对应 README §7 / README §3.3）。
 
 薄：parse 失败回文，否则转给 play_turn.handle_player_text。不调用 arbiter /
 pipeline / matching——那些全部封在已经装配好的 PlayTurnService 里（见
 bootstrap.py 的组合根）。
 
-只读查询命令（inspect_npc 等，GAME_DESIGN §3.1）在这里被拦下，直接调只读服务，
+只读查询命令（inspect_npc 等，README §3.3）在这里被拦下，直接调只读服务，
 不进 PlayTurnService——它们不改状态、不消耗回合、不该有 AppliedDiff。
 """
 from __future__ import annotations
@@ -23,6 +23,7 @@ from view.state_diff_view import StateDiffView
 if TYPE_CHECKING:
     from model.domain.events import GameEventDef
     from model.domain.map import WorldView
+    from model.services.character_service import CharacterService
     from model.services.play_turn import PlayTurnService
     from model.services.ports import AgentRepository, EventRepository, WorldRepository
     from model.services.world_query_assistant import WorldQueryAssistant
@@ -37,6 +38,7 @@ class ChatController:
         events: "EventRepository",
         rng: "random.Random | None" = None,
         world_query: "WorldQueryAssistant | None" = None,
+        characters: "CharacterService | None" = None,
     ) -> None:
         self._agent_repo = agent_repo
         self._world_repo = world_repo
@@ -44,6 +46,7 @@ class ChatController:
         self._events = events
         self._rng = rng or random.Random()  # 神识扫描（_handle_scan）用；与对局的 rng 无需同一份
         self._world_query = world_query
+        self._characters = characters
 
     def on_player_message(self, raw_text: str, agent_id: str) -> ChatResponse:
         agent = self._agent_repo.load(agent_id)
@@ -65,7 +68,10 @@ class ChatController:
             return self._handle_query(cmd, agent, world)
 
         result = self._play_turn.handle_player_text(agent, world, raw_text)
-        self._agent_repo.save(agent)
+        if self._characters is not None:
+            self._characters.save_player(agent)
+        else:
+            self._agent_repo.save(agent)
         self._world_repo.save(agent.time_anchor.current_game_time)
 
         event_index = {

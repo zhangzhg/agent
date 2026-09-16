@@ -1,4 +1,4 @@
-"""model/services/npc_generation.py — NPC 生成规则（GAME_DESIGN §6.1）。
+"""model/services/npc_generation.py — NPC 生成规则（README §3.6）。
 
 灵根：五行随机，可复合。资质：正态分布，均值对应"中人之姿"，影响修炼速度倍率
 0.5x~2.0x。运势：均匀分布，影响奇遇标签权重加成。出身：按出生地城市模板抽

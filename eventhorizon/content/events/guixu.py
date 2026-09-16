@@ -1,4 +1,4 @@
-"""content/events/guixu.py — 归墟秘境事件（GAME_DESIGN §5.1：高境界限定，隐藏点位；
+"""content/events/guixu.py — 归墟秘境事件（README §3.6：高境界限定，隐藏点位；
 需先被神识扫描发现，见 model/services/exploration_service.py）。
 """
 from __future__ import annotations

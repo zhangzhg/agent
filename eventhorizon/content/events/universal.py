@@ -1,5 +1,5 @@
 """content/events/universal.py — 通用事件（applicable_locations=["*"]，
-GAME_DESIGN §9.1 通用生活基础事件）。
+README §3.4 通用生活基础事件）。
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ SUDDEN_INSIGHT = GameEventDef(
     priority=5,
     tags=("修炼", "奇遇"),
     aliases=(),
-    # 悟性高的 Agent 顿悟事件恢复更快（GAME_DESIGN §7.5），novelty_curve_override
+    # 悟性高的 Agent 顿悟事件恢复更快（README §3.7），novelty_curve_override
     # 覆盖默认新鲜度曲线的半衰期；具体系数由录入时按 Agent.insight 分档配置。
     novelty_curve_override={"half_life_steps": 4, "floor": 0.3},
     result_pool=(StateChange(field="cultivation", delta=10), StateChange(field="heart_demon", delta=-0.02)),

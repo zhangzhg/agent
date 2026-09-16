@@ -5,7 +5,7 @@
 结果"，不碰游戏状态；这一层负责把它的 `LiveAuthorOutcome` 真正落到对局里：校验、
 落库、算向量、挂追问、记延迟结果、回收旧的实时事件。
 
-**为什么单独成一层**（优化建议.md P1-1）：这一摊逻辑原本全长在
+**为什么单独成一层**（README §6.1 P1-1）：这一摊逻辑原本全长在
 `PlayTurnService` 里，把它顶到了 850 行——一个类同时管输入路由、5 种挂起态、
 实时创作、系统命令、两段式结算、流程图推进。这些方法彼此高度内聚（都围绕
 "LiveContentAuthor 说了什么、该怎么落地"），跟两段式流水线基本不耦合，是最干净
@@ -54,7 +54,7 @@ _LIVE_RESULT_MAX_WAIT_TURNS = 3
 # 兜底每回合装载的命令池也越滚越大。手工/种子内容不在回收范围内。
 _LIVE_EVENT_KEEP = 200
 
-# 单回合的大模型调用预算（优化建议.md P1-4）。一次玩家输入最坏情况下会串行发起
+# 单回合的大模型调用预算（README §6.1 P1-4）。一次玩家输入最坏情况下会串行发起
 # 多次往返：伏笔收尾判断 → 实时创作 → result_pool 补问 → 地点创作的工具循环 →
 # 补叙事文案。全部同步阻塞，一旦某次 GLM 变慢，玩家就是干等且看不出卡在哪。
 # 超预算就直接走各调用点已经写好的降级路径（reject / 默认值 / 兜底文案），
@@ -65,7 +65,7 @@ _MAX_LLM_SECONDS_PER_TURN = 45.0
 
 @dataclass(frozen=True, slots=True)
 class Resolution:
-    """`resolve_*_outcome` 的三态结果（优化建议.md P2）。
+    """`resolve_*_outcome` 的三态结果（README §6.1 P2）。
 
     以前这两个方法的返回类型是 `ParsedCommand | TurnResult | None` /
     `Location | TurnResult | None`——三种含义挤在一个联合类型里，逼得每个调用点都
@@ -161,11 +161,10 @@ class LiveAuthoringCoordinator:
         self.events = events
         self.embedding = embedding
         self._budget = LlmCallBudget()
-        self._author = (
-            LiveContentAuthor(_BudgetedClient(narrative_writer, self._budget))
-            if narrative_writer is not None
-            else None
+        self._budgeted_client = (
+            _BudgetedClient(narrative_writer, self._budget) if narrative_writer is not None else None
         )
+        self._author = LiveContentAuthor(self._budgeted_client) if self._budgeted_client is not None else None
 
     @property
     def enabled(self) -> bool:
@@ -174,6 +173,12 @@ class LiveAuthoringCoordinator:
     def begin_turn(self) -> None:
         """每次玩家输入开始时调一次，重置这一回合的大模型调用预算。"""
         self._budget.start()
+
+    def generate_variant_text(self, event_id: str, tags: tuple[str, ...]) -> str:
+        """补文案走同一份回合预算，variants 为空时现场生成。"""
+        from model.services.live_narrative_writer import generate_live_variant_text
+
+        return generate_live_variant_text(self._budgeted_client, event_id, tags)
 
     # ---------- 命令创作 ----------
     def author_command(self, agent: "Agent", raw: str) -> LiveAuthorOutcome:
@@ -278,6 +283,7 @@ class LiveAuthoringCoordinator:
         if outcome.location_decision is None:
             return Resolution.failed()
 
+        from model.domain.diff import WorldDiff, apply_world_diff
         from model.domain.map import Location, LocationKind, Route
 
         decision = outcome.location_decision
@@ -289,14 +295,14 @@ class LiveAuthoringCoordinator:
                 location_id=new_id, name=decision.name, kind=LocationKind(decision.kind),
                 location_type=decision.location_type, parent_location_id=parent_id, hidden=False, discovered=True,
             )
-            state.locations[new_id] = new_location
-            state.routes.append(Route(from_id=agent.location_id, to_id=new_id, bidirectional=True))
+            route = Route(from_id=agent.location_id, to_id=new_id, bidirectional=True)
+            apply_world_diff(state, WorldDiff(locations_add=(new_location,), routes_add=(route,)))
             return Resolution.ready(new_location)
         new_location = Location(
             location_id=new_id, name=decision.name, kind=LocationKind(decision.kind),
             location_type=decision.location_type, parent_location_id=None, hidden=True, discovered=False,
         )
-        state.locations[new_id] = new_location
+        apply_world_diff(state, WorldDiff(locations_add=(new_location,)))
         return Resolution.replied(
             TurnResult.rejected(f"「{decision.name}」虽有耳闻，但眼下尚未对外开放，暂时去不了。")
         )

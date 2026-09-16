@@ -448,7 +448,7 @@ class CommandIntentFallbackTests(unittest.TestCase):
 
 
 class TerminalFallbackTests(unittest.TestCase):
-    """优化策略.md 的终极兜底：规则解析/向量意图/实时创作全部落空时，第 4 轮起
+    """终极兜底（README §1.13）：规则解析/向量意图/实时创作全部落空时，第 4 轮起
     不再回落"听不懂"，而是执行预置的 idle_wander 事件——玩家的话被"听懂"了，
     只是什么都没发生，还消耗了一点时间，跟被系统拒绝观感完全不同。"""
 
@@ -467,7 +467,7 @@ class TerminalFallbackTests(unittest.TestCase):
         self.assertEqual(result.command_event_id, "idle_wander")
 
     def test_turn_within_first_three_still_gets_soft_guidance_not_idle_wander(self):
-        """GAME_DESIGN §1.1 前 3 轮的引导提示不该被终极兜底顶替掉。"""
+        """README §3.2 前 3 轮的引导提示不该被终极兜底顶替掉。"""
         events = InMemoryEventRepository({"idle_wander": self._idle_wander_def(), "eat": _command()})
         play_turn = make_play_turn(events)
         agent = make_agent(turn_count=1)

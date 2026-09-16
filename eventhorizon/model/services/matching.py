@@ -54,7 +54,7 @@ def build_context_embedding(
 def build_narrative_context_text(
     *, location: str, location_type: str, realm: str, money: int, age: int, time_shichen: int, flags: "set[str] | None" = None
 ) -> str:
-    """给叙事贴切度重排用的自然语言描述（《向量化.md》"构建上下文查询文本"：
+    """给叙事贴切度重排用的自然语言描述（README §1.4：
     "不要直接把数据库字段丢给 Embedding 模型，而要编写一段具有修仙风味的自然语言
     描述"）——跟 build_context_embedding() 极简的结构化字符串是两回事，服务的目的
     也不同：那个用于"触发条件是否成立"的精确判定，这个用于"这个事件此刻讲不讲得
@@ -66,7 +66,7 @@ def build_narrative_context_text(
 
 
 def narrative_fit_multiplier(event_def: "GameEventDef", ctx: MatchContext) -> float:
-    """《向量化.md》"第二阶段：向量语义匹配"——候选事件跟玩家此刻处境的语义贴切度，
+    """README §1.4 第二阶段：向量语义匹配——候选事件跟玩家此刻处境的语义贴切度，
     折算成 reweight_and_pick 的一个温和乘子（[0.5, 1.5]），只做软加权，不做硬
     过滤：贴切的候选被抽中概率略高，不贴切的略低，但谁都不会因为这个乘子被直接
     排除出候选池——跟 predicate_text 那种硬门槛判定是两个不同的机制。两边向量
@@ -208,7 +208,7 @@ def reweight_and_pick(
     rng: random.Random,
     extra_weight: "Callable[[GameEventDef], float] | None" = None,
 ) -> "GameEventDef | None":
-    """extra_weight 是内容侧临时加权的口子（如 GAME_DESIGN §4.2 灵气潮汐日"妖兽类
+    """extra_weight 是内容侧临时加权的口子（如 README §3.5 灵气潮汐日"妖兽类
     事件权重 ×2"），不改新颖度乘子本身——潮汐加成与"这条事件最近有没有抽过"是两回事。"""
     if not candidates:
         return None
@@ -222,7 +222,7 @@ def reweight_and_pick(
 
 
 def tidal_beast_weight_multiplier(event_def: "GameEventDef", now: "GameTime", boosted_tag: str = "妖兽", multiplier: float = 2.0):
-    """GAME_DESIGN §4.2："狂暴期"妖兽类事件权重 ×2。用作 reweight_and_pick 的
+    """README §3.5："狂暴期"妖兽类事件权重 ×2。用作 reweight_and_pick 的
     extra_weight 参数：`lambda e: tidal_beast_weight_multiplier(e, now)`。"""
     from model.domain.time import GameCalendar
 

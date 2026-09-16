@@ -18,7 +18,7 @@ def _default_realm_order() -> tuple[str, ...]:
 
 
 def _default_breakthrough() -> dict[str, float]:
-    """GAME_DESIGN §7.2：P(突破) = clamp(资质×灵气浓度×丹药加成 − 心魔 − 境界惩罚, 0.05, 0.95)。
+    """README §3.7：P(突破) = clamp(资质×灵气浓度×丹药加成 − 心魔 − 境界惩罚, 0.05, 0.95)。
     示例代入（练气三层→四层，资质1.0，灵气浓度0.4，无丹药，心魔0.1，境界惩罚0.05）
     应得 P=0.25——result_pool_executor._breakthrough_probability 按这份配置复算即得此数。"""
     return {
@@ -34,7 +34,7 @@ def _default_breakthrough() -> dict[str, float]:
 
 
 def _default_combat() -> dict[str, float]:
-    """GAME_DESIGN §7.3：P(胜) = clamp(境界差 + 道具 + 运势 − 心魔, 0.05, 0.95)，
+    """README §3.7：P(胜) = clamp(境界差 + 道具 + 运势 − 心魔, 0.05, 0.95)，
     境界差按"每高一级 +0.15，每低一级 -0.15"换算。装备加成留待 V1+ 装备系统，
     当前恒为 0；示例（同境界、+0.1 道具、运势基线、心魔 0.05）应得 P=0.55。"""
     return {
@@ -51,7 +51,7 @@ def _default_cultivation_rate() -> dict[str, float]:
 
 
 def _default_cultivation_required() -> dict[str, float]:
-    """突破所需修为（GAME_DESIGN §7.1"修为需求"列）。练气按"每层 100 × 九层"折算
+    """突破所需修为（README §3.7"修为需求"列）。练气按"每层 100 × 九层"折算
     总量：本引擎的 realm_order 不建模子层，Agent.cultivation 连续累加，练气内部第几层
     由 view 层按 cultivation // 100 近似展示（见 view/character_panel_view.py）。"""
     return {
@@ -75,7 +75,7 @@ def _default_lifespan_by_realm() -> dict[str, float]:
         "化神": 1000.0,
         "渡劫": 1500.0,
         "大乘": 3000.0,
-        "仙人": 999999.0,  # 叙事性终局，非数值上限（GAME_DESIGN §7.1）
+        "仙人": 999999.0,  # 叙事性终局，非数值上限（README §3.7）
     }
 
 

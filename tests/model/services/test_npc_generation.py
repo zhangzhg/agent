@@ -1,4 +1,4 @@
-"""tests/model/services/test_npc_generation.py — NPC 生成规则（GAME_DESIGN §6.1）。
+"""tests/model/services/test_npc_generation.py — NPC 生成规则（README §3.6）。
 
 之前完全没有测试覆盖（audit 发现的缺口之一）：generate_npc 是纯函数，没人验证过
 产出的 Agent 是否满足文档承诺的范围/标记。

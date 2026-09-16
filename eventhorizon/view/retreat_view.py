@@ -1,4 +1,4 @@
-"""view/retreat_view.py — 闭关结算摘要文案（GAME_DESIGN §4.3）。
+"""view/retreat_view.py — 闭关结算摘要文案（README §3.5）。
 
 结算摘要必须包含修为/寿元变化、期间被跳过的全局事件类型汇总，不逐条罗列。
 """

@@ -1,4 +1,4 @@
-"""content/items.py — 物品定义（供背包面板展示，GAME_DESIGN §2.6）。"""
+"""content/items.py — 物品定义（供背包面板展示，README §3.2）。"""
 from __future__ import annotations
 
 from model.domain.items import ItemDef, ItemKind

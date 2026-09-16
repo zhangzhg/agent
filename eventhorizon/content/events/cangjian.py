@@ -1,4 +1,4 @@
-"""content/events/cangjian.py — 藏剑山门事件（GAME_DESIGN §5.1：拜师、修炼类事件；
+"""content/events/cangjian.py — 藏剑山门事件（README §3.6：拜师、修炼类事件；
 灵气浓度 0.7）。
 """
 from __future__ import annotations

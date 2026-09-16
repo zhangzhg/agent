@@ -1,5 +1,5 @@
 """tests/model/repositories/test_live_event_pruning.py — 实时创作事件的容量回收
-（优化建议.md P1-5）。
+（README §6.1 P1-5）。
 
 每一句没被识别的玩家输入都会创作一条永久的 live_ 事件，原本只增不减：录入编辑器
 的事件列表会被玩家碎碎念淹没，向量兜底每回合装载的命令池也越滚越大。这里钉住

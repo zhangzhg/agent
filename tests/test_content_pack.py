@@ -1,4 +1,4 @@
-"""tests/test_content_pack.py — 内容库完整性自检（GAME_DESIGN §9.3 录入自检清单
+"""tests/test_content_pack.py — 内容库完整性自检（README §6.3 录入自检清单
 的一部分，用测试固化下来而不是只靠人工过一遍）。
 
 之前没有任何测试覆盖 content/ 下的实际数据，一条真实 bug 就藏在这里：apprentice
@@ -57,7 +57,7 @@ class ContentPackIntegrityTests(unittest.TestCase):
 
     def test_item_drops_reference_known_items(self):
         """事件掉落的物品必须先在 content/items.py 里定义过，否则背包面板拿到一个
-        查不到名字/描述的 item_id（GAME_DESIGN §2.6）。"""
+        查不到名字/描述的 item_id（README §3.2）。"""
         from model.domain.results import ItemConsume, ItemDrop
 
         known_ids = {item.item_id for item in ALL_ITEMS}
@@ -105,7 +105,7 @@ class ContentPackIntegrityTests(unittest.TestCase):
 
     def test_applicable_locations_match_a_real_location_type(self):
         """"*" 或某个在 MVP 世界里真实存在的地点类型；写错字会让事件永远进不了
-        任何合格池，静默变成死代码（GAME_DESIGN §9.3 自检清单第一条）。"""
+        任何合格池，静默变成死代码（README §6.3 自检清单第一条）。"""
         world = build_mvp_world()
         known_types = {loc.location_type for loc in world.locations.values()}
         bad: list[str] = []

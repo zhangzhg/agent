@@ -1,5 +1,5 @@
 """model/services/chat_parser.py — 玩家脑洞文本解析（对应 README 1.11 /
-GAME_DESIGN §3.1）。
+README §3.3）。
 
 MVP 是精确别名表，只做映射，不调用大模型/向量；失败返回 None——TODO #1 提过的
 "同义词多了会退化成必须背咒语"，V2 向量匹配已经落地，但故意没放在这个类里：
@@ -8,7 +8,7 @@ PlayTurnService.handle_player_text 在这里返回 None 之后，先试向量兜
 （live_content_author.py），两者都是"这个类解析不了"之后的下一层，不属于
 "纯文本映射"这个模块的职责。
 
-`move`/`retreat_start`/`inspect_npc` 是"系统命令"（GAME_DESIGN §3.1 表格）：不是
+`move`/`retreat_start`/`inspect_npc` 是"系统命令"（README §3.3 表格）：不是
 事件库里的 GameEventDef，直接由 ChatParser 内置识别，PlayTurnService / controller
 按 event_id 特判处理，不查 EventRepository。
 """
@@ -53,7 +53,7 @@ _INSPECT_PATTERNS = (
     re.compile(r"^打听\s*(.+)$"),
     re.compile(r"^看看那(?:个|位)?人?[，,]?\s*(.*)$"),
 )
-# 神识扫描（GAME_DESIGN §5.3）：不消耗回合的只读探索命令，跟 inspect_npc 同一类。
+# 神识扫描（README §3.6）：不消耗回合的只读探索命令，跟 inspect_npc 同一类。
 _SCAN_ALIASES = ("神识扫描", "用神识扫描", "扫描", "运转神识")
 _PRONOUN_WORDS = ("它", "这个", "那个", "这", "那")
 _DEFAULT_OBJECT_FILLABLE_EVENT_IDS = frozenset({"buy", "watch", "fight", "apprentice"})
@@ -99,7 +99,7 @@ class ChatParser:
     ) -> None:
         """短语 → event_id，来自已发布命令型 GameEventDef.aliases（如「吃饭」→ eat）。
         object_fillable_event_ids：这些 event_id 命中「它/这个」等代词时，用
-        scene_focus 回填宾语（GAME_DESIGN §3.1 代词解析）。"""
+        scene_focus 回填宾语（README §3.3 代词解析）。"""
         self._alias_to_event_id = alias_to_event_id
         self._object_fillable_event_ids = object_fillable_event_ids
 
@@ -193,7 +193,7 @@ class ChatParser:
         return None
 
     def suggest_aliases(self, candidates: "list[GameEventDef]", n: int = 2) -> list[str]:
-        """从当前地点的命令池里现取 n 个常见别名，供软性引导用（GAME_DESIGN §1.1）。
+        """从当前地点的命令池里现取 n 个常见别名，供软性引导用（README §3.2）。
         不是写死的固定文案——PlayTurnService 拿这个拼「要不试试…」。"""
         out: list[str] = []
         for defn in candidates:

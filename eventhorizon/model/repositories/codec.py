@@ -21,7 +21,7 @@ from model.domain.agent import (
 )
 from model.domain.balance import DEFAULT_REALM_ORDER
 from model.domain.cause import CauseLink
-from model.domain.diff import AppliedDiff, LocationAttrChange, WorldDiff
+from model.domain.diff import AppliedDiff, HistoryRecord, LocationAttrChange, WorldDiff
 from model.domain.events import EventVariant, GameEventDef, GameEventOccurrence, ReplyOption, TriggerSource
 from model.domain.items import Inventory
 from model.domain.map import Location, LocationCondition, LocationKind, Route, WorldState
@@ -41,14 +41,26 @@ from model.domain.states import state_by_name
 from model.domain.time import AgentTimeAnchor, Epoch, GameTime
 
 # ---------- GameTime ----------
+# 新档只写整数 ordinal（自 year=0 起的时辰数，大约 4~8 字节）。旧档是
+# {"epoch","year","month","day","shichen"} 约 70 字节一份；AgentEventHistory
+# 里 recent_tags 最多 200 条、每个 event_id 最多 64 次触发，长局下对象格式会把
+# 单份快照撑到上百 KB，SQLite 写盘变慢甚至失败。from 同时认两种形状，旧档不丢。
 
 
-def game_time_to_dict(t: GameTime) -> dict:
-    return {"epoch": t.epoch.value, "year": t.year, "month": t.month, "day": t.day, "shichen": t.shichen}
+def game_time_to_dict(t: GameTime) -> int:
+    return t.ordinal()
 
 
-def game_time_from_dict(d: dict) -> GameTime:
-    return GameTime.new(Epoch(d["epoch"]), d["year"], d["month"], d["day"], d["shichen"])
+def game_time_from_dict(value: int | dict) -> GameTime:
+    if isinstance(value, int):
+        return GameTime.from_ordinal(value)
+    if isinstance(value, dict):
+        epoch = Epoch(value["epoch"]) if value.get("epoch") else Epoch.TAIYI
+        if "year" in value:
+            return GameTime.new(epoch, value["year"], value["month"], value["day"], value["shichen"])
+        if "o" in value:
+            return GameTime.from_ordinal(int(value["o"]), epoch)
+    raise TypeError(f"cannot decode GameTime from {type(value).__name__}: {value!r}")
 
 
 # ---------- Predicate / PredicateGroup ----------
@@ -271,6 +283,7 @@ def applied_diff_to_dict(diff: AppliedDiff | None) -> dict | None:
         "pending_retreat_prompt_set": diff.pending_retreat_prompt_set,
         "pending_clarification_set": pending_clarification_json,
         "pending_live_result_set": pending_live_result_json,
+        "history_records": [_history_record_to_dict(r) for r in diff.history_records],
     }
 
 
@@ -298,6 +311,7 @@ def applied_diff_from_dict(d: dict | None) -> AppliedDiff | None:
         pending_retreat_prompt_set=d.get("pending_retreat_prompt_set"),
         pending_clarification_set=pending_clarification,
         pending_live_result_set=pending_live_result,
+        history_records=tuple(_history_record_from_dict(r) for r in d.get("history_records", ())),
     )
 
 
@@ -307,7 +321,9 @@ def world_diff_to_dict(diff: WorldDiff | None) -> dict | None:
     return {
         "location_changes": [
             {"location_id": c.location_id, "key": c.key, "old": c.old, "new": c.new} for c in diff.location_changes
-        ]
+        ],
+        "locations_add": [location_to_dict(loc) for loc in diff.locations_add],
+        "routes_add": [route_to_dict(r) for r in diff.routes_add],
     }
 
 
@@ -317,7 +333,31 @@ def world_diff_from_dict(d: dict | None) -> WorldDiff | None:
     return WorldDiff(
         location_changes=tuple(
             LocationAttrChange(c["location_id"], c["key"], c["old"], c["new"]) for c in d.get("location_changes", ())
-        )
+        ),
+        locations_add=tuple(location_from_dict(c) for c in d.get("locations_add", ())),
+        routes_add=tuple(route_from_dict(c) for c in d.get("routes_add", ())),
+    )
+
+
+def _history_record_to_dict(r: HistoryRecord) -> dict:
+    return {
+        "event_id": r.event_id,
+        "at": game_time_to_dict(r.at),
+        "tags": list(r.tags),
+        "variant": r.variant,
+        "exclusive_tags": list(r.exclusive_tags),
+        "cooldown_shichen": r.cooldown_shichen,
+    }
+
+
+def _history_record_from_dict(d: dict) -> HistoryRecord:
+    return HistoryRecord(
+        event_id=d["event_id"],
+        at=game_time_from_dict(d["at"]),
+        tags=tuple(d.get("tags", ())),
+        variant=d.get("variant", 0),
+        exclusive_tags=tuple(d.get("exclusive_tags", ())),
+        cooldown_shichen=d.get("cooldown_shichen", 0),
     )
 
 

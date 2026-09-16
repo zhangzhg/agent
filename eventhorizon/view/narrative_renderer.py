@@ -38,7 +38,7 @@ def render_turn(
     placeholders: dict,
     location_condition: "LocationCondition | None" = None,
 ) -> str:
-    """location_condition：GAME_DESIGN §5.3——废墟态地点固定插入环境描写钩子，
+    """location_condition：README §3.6——废墟态地点固定插入环境描写钩子，
     不需要额外 UI 标记，玩家从叙述本身就能判断"这里发生过事"。"""
     if result.parse_error:
         return result.parse_error

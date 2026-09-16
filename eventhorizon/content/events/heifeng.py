@@ -1,4 +1,4 @@
-"""content/events/heifeng.py — 黑风谷事件（GAME_DESIGN §5.1：战斗/危险类事件，
+"""content/events/heifeng.py — 黑风谷事件（README §3.6：战斗/危险类事件，
 妖兽出没；灵气潮汐"狂暴期"妖兽类事件权重 ×2，见 §4.2）。
 
 qi_deviation 是走火入魔（force 级），由 BREAKTHROUGH 连续失败达阈值时 chain

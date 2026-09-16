@@ -257,7 +257,7 @@ class BuildContextEmbeddingTests(unittest.TestCase):
 
 
 class BuildNarrativeContextTextTests(unittest.TestCase):
-    """《向量化.md》"构建上下文查询文本"：给叙事重排用的自然语言描述，跟
+    """README §1.4"构建上下文查询文本"：给叙事重排用的自然语言描述，跟
     build_context_embedding() 极简的结构化字符串是两种不同风格的文本。"""
 
     def test_produces_natural_language_sentence_with_key_fields(self):

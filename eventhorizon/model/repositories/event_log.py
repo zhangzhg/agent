@@ -32,6 +32,7 @@ class SqliteEventLogStore:
             )
             """
         )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS event_log_ordinal ON event_log (ordinal)")
         self._conn.commit()
 
     def append(self, occurrence: GameEventOccurrence) -> None:
@@ -40,7 +41,7 @@ class SqliteEventLogStore:
             _logger.warning("refusing to log occurrence without applied_diff: %r", occurrence.event_id)
             return
         payload = json.dumps(occurrence_to_dict(occurrence), ensure_ascii=False)
-        ordinal = occurrence.occurred_at._ordinal() if hasattr(occurrence.occurred_at, "_ordinal") else 0
+        ordinal = occurrence.occurred_at.ordinal()
         self._conn.execute("INSERT INTO event_log (ordinal, payload) VALUES (?, ?)", (ordinal, payload))
         self._conn.commit()
 
@@ -49,7 +50,7 @@ class SqliteEventLogStore:
         # 快照本身。用 >= 会把恰好卡在快照时刻上的日志条目（duration_shichen=0
         # 的事件很常见，时钟压根没往前挪）在下一次 load() 时重放一遍，等于把同一条
         # diff 应用了两次——这曾经是真实存在的复读 bug。
-        since_ordinal = since._ordinal() if hasattr(since, "_ordinal") else 0
+        since_ordinal = since.ordinal()
         rows = self._conn.execute(
             "SELECT payload FROM event_log WHERE ordinal > ? ORDER BY seq ASC", (since_ordinal,)
         )
@@ -61,6 +62,12 @@ class SqliteEventLogStore:
                 continue
             out.append(occurrence_from_dict(record))
         return out
+
+    def prune_through(self, at) -> None:
+        """删掉 ordinal <= 快照时刻的日志。快照是全量状态，load() 用严格大于
+        replay_since，这些行永远不会再被读到；不删的话长局会把库撑到写不进去。"""
+        self._conn.execute("DELETE FROM event_log WHERE ordinal <= ?", (at.ordinal(),))
+        self._conn.commit()
 
 
 class InMemoryEventLogStore:
@@ -78,3 +85,6 @@ class InMemoryEventLogStore:
     def replay_since(self, since) -> list[GameEventOccurrence]:
         # 严格大于，理由见 SqliteEventLogStore.replay_since 的注释。
         return [occ for occ in self._entries if since < occ.occurred_at]
+
+    def prune_through(self, at) -> None:
+        self._entries = [occ for occ in self._entries if at < occ.occurred_at]

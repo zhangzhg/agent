@@ -1,4 +1,4 @@
-"""model/repositories/item_repository.py — 物品定义仓库（GAME_DESIGN §2.6）。
+"""model/repositories/item_repository.py — 物品定义仓库（README §3.2）。
 
 最小实现：内存字典 + 可选 SQLite 落盘。物品定义随内容包一起分发，不像事件那样
 需要草稿/发布两态（物品本身不参与粗筛/抽取，没有"未发布物品污染合格池"的问题）。

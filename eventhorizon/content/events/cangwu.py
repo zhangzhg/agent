@@ -1,8 +1,8 @@
-"""content/events/cangwu.py — 苍梧城事件（GAME_DESIGN §5.1 / §9.1，新手出生地，
+"""content/events/cangwu.py — 苍梧城事件（README §3.6 / §9.1，新手出生地，
 生活/社交密集）。
 
 金龙鱼是 README 2.2.1 玩法示例的落地：奇遇挂起 → ReplyOption 是解析兜底，不是
-界面选项列表（GAME_DESIGN §2.2）。
+界面选项列表（README §3.2）。
 """
 from __future__ import annotations
 

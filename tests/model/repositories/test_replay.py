@@ -167,6 +167,38 @@ class ReplayTests(unittest.TestCase):
             self.log.append(occ)
         self.assertEqual(self.log.replay_since(make_time().add_shichen(-1)), [])
 
+    def test_replay_restores_event_history_from_applied_diff(self):
+        from model.domain.diff import HistoryRecord
+
+        agent = make_agent()
+        self.repo.save(agent)
+        later = make_time().add_shichen(3)
+        occ = GameEventOccurrence(
+            "eat", TriggerSource.PLAYER, "A", later, 0,
+            applied_diff=AppliedDiff(
+                history_records=(HistoryRecord("eat", later, ("生活",), 0, cooldown_shichen=6),),
+                attr_deltas=(("money", -2.0),),
+            ),
+        )
+        self.log.append(occ)
+        reloaded = self.repo.load("A")
+        self.assertEqual(reloaded.event_history.trigger_count("eat"), 1)
+        self.assertEqual(reloaded.money, 8)
+
+    def test_save_drops_log_rows_already_baked_into_the_snapshot(self):
+        agent = make_agent(money=10)
+        now = make_time()
+        occ = GameEventOccurrence(
+            "eat", TriggerSource.PLAYER, "A", now, 0,
+            applied_diff=AppliedDiff(attr_deltas=(("money", -1.0),)),
+        )
+        self.log.append(occ)
+        agent.money -= 1
+        self.repo.save(agent)
+        remaining = self.conn.execute("SELECT COUNT(*) FROM event_log").fetchone()[0]
+        self.assertEqual(remaining, 0)
+        self.assertEqual(self.repo.load("A").money, 9)
+
 
 if __name__ == "__main__":
     unittest.main()

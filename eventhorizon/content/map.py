@@ -1,4 +1,4 @@
-"""content/map.py — MVP 示例世界（GAME_DESIGN §5.1 / §5.2）。
+"""content/map.py — MVP 示例世界（README §3.6 / §5.2）。
 
     [藏剑山门]
         |

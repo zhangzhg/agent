@@ -38,7 +38,7 @@ _PREDICATE_ARITY = {
     PredicateType.HAS_CAUSE: 2,
     PredicateType.LUCK_GTE: 1,
 }
-_INTERNAL_ONLY_PREDICATE_TYPES = {PredicateType.LUCK_GTE}  # 隐藏谓词（GAME_DESIGN §7.5）：
+_INTERNAL_ONLY_PREDICATE_TYPES = {PredicateType.LUCK_GTE}  # 隐藏谓词（README §3.7）：
 # 只供系统内置事件在 Python 里直接构造 Predicate 使用，编辑器/LlmEventAuthor 提交的
 # JSON 一律拒绝，避免运势谓词被随意暴露给策划拼装。
 _DISALLOWED_DIRECT_FIELDS = ("money", "realm", "境界", "金钱")

@@ -43,7 +43,7 @@ class Location:
     condition: LocationCondition = LocationCondition.INTACT
     parent_location_id: str | None = None  # 建筑内部子图的父节点；也用于挂"藏在哪个地点底下"的隐藏点位
 
-    # —— 探索反馈（GAME_DESIGN §5.3 神识扫描）——
+    # —— 探索反馈（README §3.6 神识扫描）——
     hidden: bool = False  # 未扫描前不出现在常规地点列表 / 移动目的地里
     concealment: float = 0.0  # 隐蔽度：扫描命中概率，示意 0.15~0.40
     discovered: bool = False  # 扫描命中后翻真；持久化在 WorldState 里，不因重连丢失
@@ -113,7 +113,7 @@ class WorldView:
         return self._state.weather
 
     def find_location_by_name(self, hint: str) -> Location | None:
-        """"去{地点}"式移动命令的模糊匹配（GAME_DESIGN §3.1："地点名走模糊匹配，
+        """"去{地点}"式移动命令的模糊匹配（README §3.3："地点名走模糊匹配，
         不要求精确"）：先精确匹配 id/名称，再退化成子串匹配；隐藏未发现的地点不参与
         匹配（不能靠打字凭空"去"一个还没被神识扫描发现的秘境）。"""
         hint = hint.strip()
@@ -137,7 +137,7 @@ class WorldView:
         return None
 
     def hidden_candidates_at(self, parent_location_id: str) -> list[Location]:
-        """某地点下尚未被发现的隐藏点位，供神识扫描只读查询（GAME_DESIGN §5.3）。"""
+        """某地点下尚未被发现的隐藏点位，供神识扫描只读查询（README §3.6）。"""
         return [
             loc
             for loc in self._state.locations.values()

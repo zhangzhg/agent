@@ -1,4 +1,4 @@
-"""model/services/play_turn.py — 对局两段循环（唯一编排处，对应 README 2.2 / 4.9）。
+"""model/services/play_turn.py — 对局两段循环（唯一编排处，对应 README §3.1）。
 
 对局唯一入口：玩家聊天、NPC 日程、时钟到点，都 EventBus.publish 一条已解析好的
 GameEventOccurrence（或先 publish 命令意图，由本服务订阅后补全）。顺序：仲裁 →
@@ -15,14 +15,14 @@ import random
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from model.domain.diff import AppliedDiff, apply_agent_diff
+from model.domain.diff import AppliedDiff, HistoryRecord, apply_agent_diff
 from model.domain.events import EventVariant, GameEventOccurrence, TriggerSource
-from model.domain.results import StateChange
-from model.domain.system_events import AgentStateChanged
+from model.domain.results import ItemConsume, StateChange
+from model.domain.system_events import AgentStateChanged, DeathEvent
 from model.services.arbiter import ArbitrationDecision, EventArbiter
 from model.services.chat_parser import MOVE_EVENT_ID, ParsedCommand, QUERY_EVENT_IDS, RETREAT_START_EVENT_ID
+from model.services.death_service import DeathService, RebirthPath
 from model.services.live_authoring_coordinator import LiveAuthoringCoordinator
-from model.services.live_narrative_writer import generate_live_variant_text
 from model.services.matching import (
     MatchContext,
     build_context_embedding,
@@ -39,7 +39,7 @@ from model.services.pipeline import Pipeline, PipelineContext
 from model.services.retreat_intent_parser import parse_retreat_duration, stop_when_realm_reached
 from model.services.turn_result import TurnResult
 
-# 优化策略.md 终极兜底用的预置事件（content/events/commands.py::IDLE_WANDER）。
+# 终极兜底用的预置事件（content/events/commands.py::IDLE_WANDER，README §1.13）。
 # 不用 chat_parser.py 那套 MOVE_EVENT_ID/RETREAT_START_EVENT_ID 常量的路子，因为
 # idle_wander 不是系统命令，只是一个普通的、seed 时就发布好的命令型事件——直接按
 # event_id 字符串查库即可，跟 EAT/MEDITATE 等其他内置命令没有本质区别。
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from model.domain.map import WorldView
     from model.services.chat_parser import ChatParser
     from model.services.clock_service import GameClock, RetreatService
+    from model.services.death_service import DeathService
     from model.services.event_bus import EventBus
     from model.services.live_narrative_writer import LlmClient
     from model.services.ports import EmbeddingPort, EventLogStore, EventRepository, ScenarioRepository
@@ -62,6 +63,12 @@ _logger = logging.getLogger("eventhorizon.play_turn")
 
 _RETREAT_PROMPT_TEXT = '要闭关多久？（可以说"十年""到金丹为止"或"随便"）'
 _RETREAT_UNPARSEABLE_TEXT = '没听懂要闭关多久，你可以说"十年""到金丹为止"或"随便"。'
+_FORCE_EVENT_BY_REASON = {"天劫": "qi_deviation", "走火入魔": "qi_deviation"}
+_REBIRTH_ALIASES = {
+    "转世": RebirthPath.REINCARNATE,
+    "夺舍": RebirthPath.POSSESS,
+    "继承": RebirthPath.INHERIT,
+}
 
 
 class PlayTurnService:
@@ -80,6 +87,8 @@ class PlayTurnService:
         balance: "BalanceTable | None" = None,
         embedding: "EmbeddingPort | None" = None,
         narrative_writer: "LlmClient | None" = None,
+        death_service: "DeathService | None" = None,
+        npc_provider=None,
     ) -> None:
         self.bus = bus
         self.arbiter = arbiter
@@ -94,6 +103,8 @@ class PlayTurnService:
         self.balance = balance
         self.embedding = embedding
         self.narrative_writer = narrative_writer
+        self.death_service = death_service or DeathService()
+        self.npc_provider = npc_provider
         # embedding/narrative_writer 都是可选的（未配置就是 None）：embedding 只用于
         # predicate_text 的向量相似度判定；narrative_writer 是 LlmEventWriter（README
         # 对局第二段表格），事件命中但 variants 为空时现场补一句文案，见
@@ -115,7 +126,7 @@ class PlayTurnService:
         字段也存回去，冲掉原定义）。"""
         if defn.variants:
             return defn
-        text = generate_live_variant_text(self.narrative_writer, defn.event_id, defn.tags)
+        text = self.live_authoring.generate_variant_text(defn.event_id, defn.tags)
         patched = replace(defn, variants=(EventVariant(text=text),))
         self.events.save_event_def(patched)
         return patched
@@ -152,15 +163,18 @@ class PlayTurnService:
 
         0. **回合级副作用**——计轮数、重置大模型预算、结算上一条伏笔的延迟结果。
            都不消费 raw，不提前返回。
-        1. **闭关时长追问**（GAME_DESIGN §4.3）：答不上来就一直卡在这一档。
+        1. **闭关时长追问**（README §3.5）：答不上来就一直卡在这一档。
         2. **奇遇/流程图挂起态**（README 1.11）：先试局部选项，没命中就按"错过"
            丢弃挂起项，继续往下当普通命令解析。
         3. **追问补全**（README §1.12）：上一句被判信息不全时挂起等这一句。
         4. **常规命令**：规则解析 → 向量意图 → 实时创作 → idle_wander 终极兜底，
            四层依次尝试（README §1.13）。
         """
+        if agent.state.name == "dead":
+            return self._handle_rebirth_choice(agent, world, raw)
+
         # —— 0) 回合级副作用 ——
-        # 每轮输入都计数（成功/失败都算），驱动"提示只出现在前 3 轮"（GAME_DESIGN §1.1）
+        # 每轮输入都计数（成功/失败都算），驱动"提示只出现在前 3 轮"（README §3.2）
         apply_agent_diff(agent, AppliedDiff(attr_deltas=(("turn_count", 1.0),)))
         # 这一回合的大模型调用预算从零开始算（见 live_authoring_coordinator.LlmCallBudget）
         self.live_authoring.begin_turn()
@@ -235,13 +249,13 @@ class PlayTurnService:
         if resolved.kind == "replied":
             return resolved.reply
         if resolved.kind == "failed":
-            return TurnResult.rejected(f"找不到「{combined}」这个地方。")
+            return self._terminal_fallback(agent, world)
         return self._complete_move(agent, world, resolved.value)
 
     def _terminal_fallback(self, agent: "Agent", world: "WorldView") -> TurnResult:
-        """优化策略.md 的"终极兜底"原则：规则解析/向量意图/实时创作（含追问）
-        全部走不通时，绝不能让玩家看到干瘪的拒绝。GAME_DESIGN §1.1 的前 3 轮
-        软性引导（_soft_guidance_message 会给出招式举例）保留不变；从第 4 轮起，
+        """终极兜底原则（README §1.13）：规则解析/向量意图/实时创作（含追问）
+        全部走不通时，绝不能让玩家看到干瘪的拒绝。前 3 轮软性引导
+        （_soft_guidance_message 会给出招式举例）保留不变；从第 4 轮起，
         原本落在这里的"听不懂，再说一次？"改由 _idle_wander_fallback 接管——
         直接执行预置的 idle_wander 事件，给玩家一段"什么都没发生，但话确实被
         听懂了"的旁白，并按其配置消耗一点时间，而不是被系统当场拒绝。"""
@@ -261,7 +275,7 @@ class PlayTurnService:
         )
 
     def _soft_guidance_message(self, agent: "Agent", world: "WorldView") -> str:
-        """GAME_DESIGN §1.1：前 3 轮给软性引导（从当前地点合格池现取别名举例），
+        """README §3.2：前 3 轮给软性引导（从当前地点合格池现取别名举例），
         之后回归简单的"听不懂"，避免变成事实上的教程文本。"""
         if agent.turn_count > 3:
             return "听不懂，再说一次？"
@@ -304,7 +318,7 @@ class PlayTurnService:
         self.events.save_event_def(patched)
         return patched
 
-    # ---------- 系统命令：move / retreat_start（GAME_DESIGN §3.1，非库内事件）----------
+    # ---------- 系统命令：move / retreat_start（README §3.3，非库内事件）----------
     def _handle_move(self, agent: "Agent", world: "WorldView", cmd) -> TurnResult:
         if agent.state.name != "idle":
             return TurnResult.rejected("现在走不开。")
@@ -342,6 +356,14 @@ class PlayTurnService:
         plan = parse_retreat_duration(raw, agent, self.balance)
         if plan is None:
             return TurnResult.rejected(_RETREAT_UNPARSEABLE_TEXT)
+        if plan.is_default_suggestion:
+            from model.domain.time import SHICHEN_PER_YEAR
+
+            years = max(1, round(plan.target_shichen / SHICHEN_PER_YEAR))
+            return TurnResult(
+                freeform_narrative=f"{plan.description}。确定的话直接说年数，比如「{years}年」。"
+            )
+
         apply_agent_diff(agent, AppliedDiff(pending_retreat_prompt_set=False))
 
         before_realm, before_cultivation = agent.realm, agent.cultivation
@@ -352,9 +374,23 @@ class PlayTurnService:
         from model.services.clock_service import summarize_retreat
 
         summary = summarize_retreat(results, agent.realm)
-        return TurnResult(
+        retreat_result = TurnResult(
             retreat_summary=summary, retreat_before_realm=before_realm, retreat_before_cultivation=before_cultivation
         )
+        if agent.lifespan_left <= 0:
+            death = self._maybe_die(agent, "寿元耗尽")
+            return death or retreat_result
+        if summary.interrupted_by_force and summary.force_reason:
+            force_id = _FORCE_EVENT_BY_REASON.get(summary.force_reason)
+            if force_id:
+                force_def = self.events.get_by_id(force_id)
+                if force_def is not None and not force_def.is_draft:
+                    force_def = self._ensure_variants(force_def)
+                    occ = self._new_occurrence(agent, force_def, TriggerSource.FORCE)
+                    forced = self.execute_occurrence(agent, world, occ, force_def)
+                    if forced is not None:
+                        return forced
+        return retreat_result
 
     # ---------- 系统触发源复用入口（日程/其它非玩家来源）----------
     def trigger(
@@ -386,31 +422,31 @@ class PlayTurnService:
         eval_ctx = agent.as_eval_context(world)
         if defn.predicate and not defn.predicate.evaluate(eval_ctx):
             return TurnResult.rejected("条件未满足。")  # 状态未改、无日志
+        previous_state = agent.state
         new_state = agent.state.try_transition(agent, occ)
         if new_state is None:
             return TurnResult.rejected("现在做不了这个。")
         agent.state = new_state
 
         if occ.trigger_source is TriggerSource.PLAYER and defn.needs_reply:
-            # 分支事件（LiveContentAuthor 的 reply_options，见 README §1.16）：
-            # 只叙述、不结算——跟第二段奇遇 needs_reply 时完全同一套挂起机制
-            # （pending_encounter_id + _try_resolve_pending/_resolve_reply_option），
-            # 这里是"第一段命令本身就是分支事件"这个新场景，直接复用而不是另起一套。
-            # 这里**不收时间**，之后玩家选哪个分支也不收——"分支不消耗时间"是明确的
-            # 产品决策，即整个分支型交互（叙述 + 选择）在游戏时间上是免费的，
-            # 见 _charge_time 的注释。
+            # 分支事件：只叙述、不结算、不收时间；但要记事件历史，冷却/次数才生效。
             self._park_encounter(agent, defn)
+            self._apply_history(agent, occ, defn)
             agent.state = agent.state.settle(agent)
             variant = pick_variant(defn, agent.event_history, self.rng)
             return TurnResult().with_prompt(defn, variant)
 
         ctx = self._run_pipeline(agent, world, occ, defn)
         if ctx.rejected:
+            agent.state = previous_state
             return TurnResult.rejected("条件未满足。")
-        self._charge_time(agent, occ, defn)  # 时间推进的唯一来源是事件时长（README §1）
+        self._charge_time(agent, occ, defn)
+        death = self._maybe_die(agent, "寿元耗尽")
         self._settle_and_publish(agent, ctx, announce_state=True)
 
         first = TurnResult.from_one(defn, ctx)
+        if death is not None:
+            return death
         if ctx.stopped:
             return first
         # 上一条实时创作事件的延迟结果还没收尾时，不抽新的第二段奇遇——避免
@@ -455,16 +491,20 @@ class PlayTurnService:
         picked = self._ensure_variants(picked)
 
         if picked.needs_reply:
-            self._park_encounter(agent, picked)  # 只叙述、不结算，等下一句
-            agent.state = agent.state.settle(agent)  # → EncounterPending
+            self._park_encounter(agent, picked)
+            self._apply_history(agent, self._new_occurrence(agent, picked, TriggerSource.ENCOUNTER), picked)
+            agent.state = agent.state.settle(agent)
             return first.with_prompt(picked, pick_variant(picked, agent.event_history, self.rng))
 
         occ2 = self._new_occurrence(agent, picked, TriggerSource.ENCOUNTER)
         ctx2 = self._run_pipeline(agent, world, occ2, picked)
         if ctx2.rejected:
             return first
-        self._charge_time(agent, occ2, picked)  # 奇遇是真的又发生了一件事，收时间
+        self._charge_time(agent, occ2, picked)
+        death = self._maybe_die(agent, "寿元耗尽")
         self._settle_and_publish(agent, ctx2, announce_state=False)
+        if death is not None:
+            return death
         return first.plus_encounter(picked, ctx2)
 
     # ---------- 结算三件套：四条结算路径共用，差异只体现在"调不调 _charge_time" ----------
@@ -476,32 +516,34 @@ class PlayTurnService:
     # 大函数：开关版读起来比重复更糟，而拆成三个之后，**某条路径"少调了哪一个"
     # 本身就是说明**——见 _charge_time 的注释。
 
-    def _run_pipeline(self, agent: "Agent", world: "WorldView", occ: GameEventOccurrence, defn: "GameEventDef"):
-        return self.pipeline.run(PipelineContext(occ, defn, agent, world, chosen_variant=occ.chosen_variant_index))
+    def _run_pipeline(
+        self, agent: "Agent", world: "WorldView", occ: GameEventOccurrence, defn: "GameEventDef", *,
+        record_history: bool = True,
+    ):
+        ctx = PipelineContext(occ, defn, agent, world, chosen_variant=occ.chosen_variant_index)
+        if record_history:
+            ctx.diff = AppliedDiff(history_records=(self._history_record(occ, defn),))
+        return self.pipeline.run(ctx)
+
+    def _history_record(self, occ: GameEventOccurrence, defn: "GameEventDef") -> HistoryRecord:
+        return HistoryRecord(
+            event_id=defn.event_id,
+            at=occ.occurred_at,
+            tags=defn.tags,
+            variant=occ.chosen_variant_index,
+            exclusive_tags=defn.exclusive_tags,
+            cooldown_shichen=defn.cooldown_shichen,
+        )
+
+    def _apply_history(self, agent: "Agent", occ: GameEventOccurrence, defn: "GameEventDef") -> None:
+        apply_agent_diff(agent, AppliedDiff(history_records=(self._history_record(occ, defn),)))
 
     def _charge_time(self, agent: "Agent", occ: GameEventOccurrence, defn: "GameEventDef") -> None:
-        """推进游戏时间 + 记事件历史（冷却、互斥标签、新鲜度都靠它）。
+        """推进游戏时间。事件历史已并入 pipeline diff 或挂起时的 _apply_history。
 
-        **只有"真正发生了一件事"的路径调它**——主命令和第二段奇遇。分支选项
-        （_resolve_reply_option）和流程图节点（_advance_scenario）**故意不调**：
-        产品上已明确"分支不消耗时间"，玩家在一个已经发生的场景里做选择，是这件事
-        的一部分，不是又过了一个时辰。时长已经在宿主事件触发时收过一次了，选项
-        再收一次等于同一件事收两遍。
-
-        这不是疏漏，是决定；改之前请先确认产品意图（优化建议.md P1-3 记录了这次
-        决策，tests/model/services/test_branch_time_semantics.py 钉住了它）。
-
-        **已知副作用**：事件历史跟时间推进绑在同一个函数里，所以分支型事件
-        （needs_reply）同样不会被 record() ——它的 cooldown_shichen 和
-        max_trigger_per_agent 因此不生效，新鲜度衰减也不记账，同一条分支事件可以
-        被反复触发。这是"不计时"顺带的结果，不是单独决定过的；如果哪天需要"分支
-        免费、但仍然吃冷却"，把 record() 从这个函数里拆出去、在挂起时调用即可
-        （见优化建议.md P1-3 的说明）。"""
+        分支选项和流程图节点故意不调：产品决策「分支不消耗时间」。
+        """
         self.clock.advance_for(agent, defn.duration_shichen)
-        agent.event_history.record(
-            defn.event_id, occ.occurred_at, defn.tags, occ.chosen_variant_index,
-            exclusive_tags=defn.exclusive_tags, cooldown_shichen=defn.cooldown_shichen,
-        )
 
     def _settle_and_publish(self, agent: "Agent", ctx, *, announce_state: bool) -> None:
         """落状态机 + 投递连锁。announce_state 对应"这次状态变化要不要广播
@@ -547,9 +589,12 @@ class PlayTurnService:
         """
         pending_def = self._ensure_variants(pending_def)
         option = pending_def.reply_options[option_index]
+        unaffordable = _results_unaffordable(agent, option.results)
+        if unaffordable:
+            return TurnResult.rejected(unaffordable)
         synthetic = replace(pending_def, result_pool=option.results, predicate=None, reply_options=())
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
-        ctx = self._run_pipeline(agent, world, occ, synthetic)
+        ctx = self._run_pipeline(agent, world, occ, synthetic, record_history=False)
         self._clear_pending_encounter(agent)
         # 注意这里**没有** _charge_time：分支不消耗时间（产品决策，见该函数注释）。
         # 连锁事件的时间由它自己那次 execute_occurrence 负责，不在这里代收。
@@ -600,13 +645,19 @@ class PlayTurnService:
         host_def = self._ensure_variants(
             self.events.get_by_id(agent.pending_scenario.host_event_id) or _blank_event_def(next_node.node_id)
         )
+        unaffordable = _results_unaffordable(agent, next_node.results)
+        if unaffordable:
+            return TurnResult.rejected(unaffordable)
         synthetic = replace(host_def, result_pool=next_node.results, predicate=None, reply_options=())
         occ = self._new_occurrence(agent, synthetic, TriggerSource.PLAYER)
-        ctx = self._run_pipeline(agent, world, occ, synthetic)
+        ctx = self._run_pipeline(agent, world, occ, synthetic, record_history=False)
 
         # 推进到新节点：还有出边则继续挂起，否则清空 pending_scenario
         if graph.edges_from(next_node.node_id):
-            agent.pending_scenario = replace(agent.pending_scenario, current_node_id=next_node.node_id)
+            apply_agent_diff(
+                agent,
+                AppliedDiff(pending_scenario_set=replace(agent.pending_scenario, current_node_id=next_node.node_id)),
+            )
         else:
             self._clear_pending_scenario(agent)
         # 同样**没有** _charge_time：走流程图的一个节点也是"在已发生的场景里做选择"，
@@ -649,6 +700,80 @@ class PlayTurnService:
         )
 
 
+    def _maybe_die(self, agent: "Agent", cause: str) -> TurnResult | None:
+        if agent.lifespan_left > 0 or agent.state.name == "dead":
+            return None
+        outcome = self.death_service.handle_death(agent, self.clock.now(), cause)
+        self.bus.publish(DeathEvent(agent.agent_id, self.clock.now(), cause))
+        self.bus.publish(AgentStateChanged(agent.agent_id, agent.state.name))
+        return TurnResult(freeform_narrative=_rebirth_prompt(outcome.epitaph, agent, self.balance, self._npcs()))
+
+    def _handle_rebirth_choice(self, agent: "Agent", world: "WorldView", raw: str) -> TurnResult:
+        path = None
+        stripped = raw.strip()
+        for alias, candidate in _REBIRTH_ALIASES.items():
+            if alias in stripped:
+                path = candidate
+                break
+        if path is None:
+            epitaph = compose_epitaph_fallback(agent)
+            return TurnResult(freeform_narrative=_rebirth_prompt(epitaph, agent, self.balance, self._npcs()))
+        npcs = self._npcs()
+        if path is RebirthPath.REINCARNATE:
+            self.death_service.reincarnate(agent)
+        else:
+            if self.balance is None:
+                return TurnResult.rejected("此路不通。")
+            options = self.death_service.available_rebirth_paths(agent, self.balance, npcs)
+            chosen = next((o for o in options if o.path is path), None)
+            if chosen is None or not chosen.available:
+                reason = chosen.reason if chosen is not None else "此路不通。"
+                return TurnResult.rejected(reason)
+            if not npcs:
+                return TurnResult.rejected("附近没有可以接手的人。")
+            if path is RebirthPath.POSSESS:
+                self.death_service.possess(agent, npcs[0])
+            else:
+                self.death_service.inherit(agent, npcs[0])
+        self.bus.publish(AgentStateChanged(agent.agent_id, agent.state.name))
+        return TurnResult(freeform_narrative=f"你选择了{path.value}。新的旅途开始了。")
+
+    def _npcs(self) -> list:
+        if self.npc_provider is None:
+            return []
+        return [a for a in self.npc_provider() if getattr(a, "is_npc", False)]
+
+
+def _rebirth_prompt(epitaph: str, agent, balance, hosts) -> str:
+    from model.services.death_service import DeathService
+
+    lines = [
+        f"[系统] {epitaph}",
+        "你的旅程结束了。接下来——",
+    ]
+    service = DeathService()
+    if balance is not None:
+        for option in service.available_rebirth_paths(agent, balance, hosts):
+            mark = option.path.value if option.available else f"{option.path.value}（不可选）"
+            lines.append(f"  {mark}：{option.reason}")
+    lines.append('（打字说出你的选择，比如"转世"）')
+    return "\n".join(lines)
+
+
+def compose_epitaph_fallback(agent) -> str:
+    return f"{agent.agent_id}已故。打字选择转世、夺舍或继承。"
+
+
+def _results_unaffordable(agent: "Agent", results) -> str | None:
+    for item in results:
+        if isinstance(item, StateChange) and item.field == "money" and item.delta is not None:
+            if agent.money + item.delta < 0:
+                return "你囊中羞涩，买不起。"
+        if isinstance(item, ItemConsume) and not agent.inventory.has(item.item_id, item.n):
+            return f"你没有足够的{item.item_id}。"
+    return None
+
+
 def _blank_event_def(node_id: str) -> "GameEventDef":
     """流程图节点找不到宿主事件定义时的兜底占位（正常不应发生：pending_scenario
     的 host_event_id 必是已发布事件）。"""
@@ -673,7 +798,7 @@ def _blank_event_def(node_id: str) -> "GameEventDef":
 
 
 def default_move_def() -> "GameEventDef":
-    """content 侧没有注册 event_id="move" 的兜底（GAME_DESIGN §3.1："去{地点}"是
+    """content 侧没有注册 event_id="move" 的兜底（README §3.3："去{地点}"是
     系统命令，不强依赖内容库；有内容库版本时优先用它的谓词/时长/变体文案）。
     公开（不带下划线前缀）：chat_controller.py 渲染叙述时也要能拿到同一份定义——
     _handle_move 用的是它合成出来的 GameEventDef，不是 events 仓库里的真实记录，

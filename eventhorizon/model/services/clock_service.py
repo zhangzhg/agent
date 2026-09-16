@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
 
 from model.domain.states import ClosedDoorState
-from model.domain.time import GameCalendar, GameTime, TimeDilation
+from model.domain.time import GameCalendar, GameTime, SHICHEN_PER_YEAR, TimeDilation
 
 if TYPE_CHECKING:
     from model.domain.agent import Agent
@@ -35,13 +35,25 @@ class GameClock:
 
     def advance_for(self, agent: "Agent", shichen: int) -> None:
         """推进该 Agent 的时间锚；跨过时辰/日边界时 publish TimePassEvent，
-        由 time_pass_handler 刷新天气灵气、并让 schedule_service 挑 NPC 事件。"""
+        由 time_pass_handler 刷新天气灵气、并让 schedule_service 挑 NPC 事件。
+        寿元与年龄按历法推进（1 年 = SHICHEN_PER_YEAR 时辰），走 apply_agent_diff。"""
         if shichen <= 0:
             return
+        from model.domain.diff import AppliedDiff, apply_agent_diff
+
         before = self._current
         agent.time_anchor.advance(shichen)
         agent.time_anchor.resync()
         self._current = self._current.add_shichen(shichen)
+        years = shichen / SHICHEN_PER_YEAR
+        age_delta = self._current.year - before.year
+        deltas: list[tuple[str, float]] = []
+        if years:
+            deltas.append(("lifespan_left", -years))
+        if age_delta:
+            deltas.append(("age", float(age_delta)))
+        if deltas:
+            apply_agent_diff(agent, AppliedDiff(attr_deltas=tuple(deltas)))
         crossed_day = (before.day, before.month, before.year) != (
             self._current.day,
             self._current.month,
@@ -66,7 +78,7 @@ class RetreatBatchResult:
 
 @dataclass
 class RetreatSummary:
-    """闭关结算摘要（GAME_DESIGN §4.3）：修为/寿元变化 + 期间被跳过的全局事件类型
+    """闭关结算摘要（README §3.5）：修为/寿元变化 + 期间被跳过的全局事件类型
     汇总，不逐条罗列——呼应 README 1.6"不强制对齐每一件事"。"""
 
     cultivation_gained: float
@@ -126,21 +138,21 @@ class RetreatService:
 
             qi = world.qi_density_of(agent.location_id) if world is not None else 1.0
             cfg = self._balance.cultivation_rate
-            # aptitude 是 GAME_DESIGN §6.1 定义的修炼速度倍率（0.5x~2.0x），原实现漏乘了
+            # aptitude 是 README §3.6 定义的修炼速度倍率（0.5x~2.0x），原实现漏乘了
             # 它——闭关速度因此对资质完全不敏感，是个真实的 bug，这里补上。
             rate = cfg["base_per_shichen"] * cfg["qi_density_weight"] * qi * agent.aptitude
+            life_before = agent.lifespan_left
             self._clock.advance_for(agent, batch)
             end = self._clock.now()
+            lifespan_spent = max(0.0, life_before - agent.lifespan_left)
 
             # 跨越潮汐日按"错过/赶上"结算一次加成，不按天重复刷（README 2.3.1）
             tidal_hits = GameCalendar.tidal_days_crossed(start, end)
             multiplier = cfg["tidal_multiplier"] if tidal_hits > 0 else 1.0
             gained = rate * batch * multiplier
-            lifespan_spent = float(batch) / 12.0  # 闭关 100 年 = 寿元 −100（README 2.4），按日折算
 
-            # apply_agent_diff 是全系统唯一改 Agent 的地方（domain/diff.py）；闭关批量
-            # 结算不例外，否则读档重放会漏掉这段修为/寿元变化。
-            batch_diff = AppliedDiff(attr_deltas=(("cultivation", gained), ("lifespan_left", -lifespan_spent)))
+            # 寿元已由 advance_for 按历法扣除，这里只记修为，避免同一跨度扣两次。
+            batch_diff = AppliedDiff(attr_deltas=(("cultivation", gained),))
             apply_agent_diff(agent, batch_diff)
             if self._log is not None:
                 occ = GameEventOccurrence(

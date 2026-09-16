@@ -1,4 +1,4 @@
-"""tests/model/services/test_exploration_service.py — 神识扫描（GAME_DESIGN §5.3）。
+"""tests/model/services/test_exploration_service.py — 神识扫描（README §3.6）。
 
 之前完全没有测试覆盖——exploration_service.py 存在于仓库里，但没人验证过它还能
 不能跑（audit 发现的"写了但没测"缺口之一）。

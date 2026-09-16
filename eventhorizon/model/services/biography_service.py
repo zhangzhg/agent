@@ -1,5 +1,4 @@
-"""model/services/biography_service.py — NPC 履历模拟（对应 README 1.5.1 /
-GAME_DESIGN §6.2，ARCHITECTURE §4.13 表格已预留此文件，V1）。
+"""model/services/biography_service.py — NPC 履历模拟（README §1.5 / §3.6）。
 
 模板一句话：未展开细履历的 NPC，用固定句式 + 随机填槽拼接，不经过事件库随机抽取。
 细履历：仅对同城 / 有未过期 CauseLink / 被查询过的 NPC 展开，真实从事件库随机抽取

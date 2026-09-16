@@ -1,4 +1,4 @@
-"""view/npc_info_card_view.py — NPC 信息卡的文本渲染（GAME_DESIGN §6.3）。"""
+"""view/npc_info_card_view.py — NPC 信息卡的文本渲染（README §3.2）。"""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING

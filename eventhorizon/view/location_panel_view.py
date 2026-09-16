@@ -1,4 +1,4 @@
-"""view/location_panel_view.py — 位置/地图面板（GAME_DESIGN §2.5）。
+"""view/location_panel_view.py — 位置/地图面板（README §3.2）。
 
 只读展示：当前地点名 + 地点类型 + 灵气浓度五格条。不放"可去地点"跳转列表——
 移动同样靠聊天（「去酒楼」），面板只做只读展示，维持单一输入入口。

@@ -36,6 +36,19 @@ class GameTimeTests(unittest.TestCase):
         self.assertTrue(GameCalendar.is_tidal_day(d15))
         self.assertFalse(GameCalendar.is_tidal_day(d2))
 
+    def test_ordinal_round_trips_calendar_fields(self):
+        t = GameTime.new(Epoch.TAIYI, 100, 3, 15, 6)
+        restored = GameTime.from_ordinal(t.ordinal())
+        self.assertEqual(restored, t)
+
+    def test_from_ordinal_matches_add_shichen(self):
+        start = GameTime.new(Epoch.TAIYI, 1, 1, 1, 0)
+        self.assertEqual(start.add_shichen(4320 + 13), GameTime.from_ordinal(start.ordinal() + 4320 + 13))
+
+    def test_ordinal_handles_backward_time(self):
+        t = GameTime.new(Epoch.TAIYI, 100, 1, 1, 0).add_shichen(-1)
+        self.assertEqual(GameTime.from_ordinal(t.ordinal()), t)
+
     def test_tidal_days_crossed_counts_once_per_hit(self):
         start = GameTime.new(Epoch.TAIYI, 100, 3, 1, 0)
         end = start.add_shichen(12 * 20)  # 跨越约 20 天，命中初一(已是start自身,不计)与十五

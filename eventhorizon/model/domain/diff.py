@@ -10,10 +10,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from model.domain.cause import CauseLink
+from model.domain.time import GameTime
 
 if TYPE_CHECKING:
     from model.domain.agent import Agent, PendingClarification, PendingLiveResult, PendingScenario
-    from model.domain.map import WorldState
+    from model.domain.map import Location, Route, WorldState
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +38,26 @@ class AppliedDiff:
     pending_encounter_set: str | None = None  # 空串 "" 表示显式清空（None 表示"本次未涉及"）
     pending_scenario_set: "PendingScenario | None | str" = "__unset__"  # "__unset__" 哨兵：未涉及；None：显式清空
     state_set: str | None = None  # 状态机结果也进 diff，重放才能还原挂起态
-    pending_retreat_prompt_set: bool | None = None  # 闭关"要多久"追问的挂起标记（GAME_DESIGN §4.3）
+    pending_retreat_prompt_set: bool | None = None  # 闭关"要多久"追问的挂起标记（README §3.5）
     pending_clarification_set: "PendingClarification | None | str" = "__unset__"  # 同 pending_scenario_set 的哨兵语义
     pending_live_result_set: "PendingLiveResult | None | str" = "__unset__"  # 同上，LiveContentAuthor 的延迟结果
+    history_records: tuple["HistoryRecord", ...] = ()  # 事件历史进 diff，重放才能还原冷却/新鲜度
 
 
 _UNSET = "__unset__"
+_NON_NEGATIVE_ATTRS = {"money", "satiety", "lifespan_left", "age"}
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryRecord:
+    """一次事件触发记入 AgentEventHistory 的差分片段。随 Occurrence.applied_diff 落日志。"""
+
+    event_id: str
+    at: GameTime
+    tags: tuple[str, ...]
+    variant: int
+    exclusive_tags: tuple[str, ...] = ()
+    cooldown_shichen: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,11 +73,17 @@ class WorldDiff:
     """世界级差分。地图改动落在快照之后时，只有它能让重放不丢。"""
 
     location_changes: tuple[LocationAttrChange, ...] = ()
+    locations_add: tuple["Location", ...] = ()
+    routes_add: tuple["Route", ...] = ()
 
     def invert(self) -> "WorldDiff":
+        # 新增地点/路线无法无损反演（没有对应的 delete 字段）；属性改写仍可对调。
         return WorldDiff(tuple(
             LocationAttrChange(c.location_id, c.key, c.new, c.old) for c in self.location_changes
         ))
+
+    def is_empty(self) -> bool:
+        return not self.location_changes and not self.locations_add and not self.routes_add
 
 
 def merge(a: AppliedDiff, b: AppliedDiff) -> AppliedDiff:
@@ -100,6 +121,7 @@ def merge(a: AppliedDiff, b: AppliedDiff) -> AppliedDiff:
         ),
         pending_clarification_set=pending_clarification,
         pending_live_result_set=pending_live_result,
+        history_records=a.history_records + b.history_records,
     )
 
 
@@ -107,7 +129,13 @@ def apply_agent_diff(agent: "Agent", d: AppliedDiff) -> None:
     """全系统唯一改 Agent 的地方之一。数值走 attr_deltas，物品走 items_add/remove，
     标志/因果/挂起字段/状态各自累加或覆盖。"""
     for name, delta in d.attr_deltas:
-        setattr(agent, name, getattr(agent, name) + delta)
+        current = getattr(agent, name)
+        new_val = current + delta
+        if isinstance(current, int) and not isinstance(current, bool):
+            new_val = int(round(new_val))
+        if name in _NON_NEGATIVE_ATTRS:
+            new_val = max(0, new_val)
+        setattr(agent, name, new_val)
     if d.realm_set is not None:
         agent.realm = d.realm_set
     if d.location_set is not None:
@@ -142,6 +170,15 @@ def apply_agent_diff(agent: "Agent", d: AppliedDiff) -> None:
         agent.pending_clarification = d.pending_clarification_set
     if d.pending_live_result_set != _UNSET:
         agent.pending_live_result = d.pending_live_result_set
+    for record in d.history_records:
+        agent.event_history.record(
+            record.event_id,
+            record.at,
+            record.tags,
+            record.variant,
+            exclusive_tags=record.exclusive_tags,
+            cooldown_shichen=record.cooldown_shichen,
+        )
 
 
 _LOCATION_ATTR_FIELDS = {"qi_density", "danger_level", "condition", "discovered"}
@@ -156,3 +193,7 @@ def apply_world_diff(world: "WorldState", d: WorldDiff) -> None:
         if location is None or change.key not in _LOCATION_ATTR_FIELDS:
             continue
         setattr(location, change.key, change.new)
+    for loc in d.locations_add:
+        world.locations[loc.location_id] = loc
+    for route in d.routes_add:
+        world.routes.append(route)

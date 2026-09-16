@@ -55,7 +55,13 @@ class SqliteAgentRepository:
         latest = self._snapshots.load_latest_snapshot()
         payload = dict(latest[0]) if latest else {}
         payload.setdefault("agents", {})[agent.agent_id] = agent_to_dict(agent)
-        self._snapshots.save_snapshot(payload, self._now_provider())
+        at = self._now_provider()
+        self._snapshots.save_snapshot(payload, at)
+        # 快照已含此刻状态；ordinal <= at 的日志 load() 永远不会重放，留下只会把
+        # 存档越写越大直到 SQLite 写失败、这一局接不下去。
+        prune = getattr(self._log, "prune_through", None)
+        if prune is not None:
+            prune(at)
 
     def list_all(self) -> "list[Agent]":
         """全部 Agent（玩家 + NPC），各自按自己的增量日志重放到当前时刻——不能只

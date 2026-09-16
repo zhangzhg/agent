@@ -25,7 +25,7 @@ class TimePassHandler:
         world: "WorldState",
         schedule_service: "ScheduleService | None" = None,
         agents_provider: "Callable[[], Iterable[Agent]] | None" = None,
-        qi_tide_multiplier: float = 1.5,  # GAME_DESIGN §4.2："全地点灵气浓度 ×1.5"
+        qi_tide_multiplier: float = 1.5,  # README §3.5："全地点灵气浓度 ×1.5"
     ) -> None:
         self._world = world
         self._schedule_service = schedule_service

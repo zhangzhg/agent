@@ -1,5 +1,5 @@
 """tests/model/services/test_llm_call_budget.py — 单回合大模型调用预算
-（优化建议.md P1-4）。
+（README §6.1 P1-4）。
 
 一次玩家输入最坏情况下会串行发起多次大模型往返（伏笔收尾判断 → 实时创作 →
 result_pool 补问 → 地点创作的工具循环 → 补叙事文案），全部同步阻塞。预算用完

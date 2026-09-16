@@ -31,7 +31,7 @@ class TurnResult:
     reject_reason: str | None = None
     # 不挂在任何 GameEventDef 变体上的系统文案（如"要闭关多久？"），view 直接透出。
     freeform_narrative: str | None = None
-    # 闭关结算摘要是结构化数据，渲染成文案是 view 的活（GAME_DESIGN §4.3）——
+    # 闭关结算摘要是结构化数据，渲染成文案是 view 的活（README §3.5）——
     # PlayTurnService 不 import view，只把数据放这里。
     retreat_summary: "RetreatSummary | None" = None
     retreat_before_realm: str | None = None

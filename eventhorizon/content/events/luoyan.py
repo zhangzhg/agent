@@ -1,4 +1,4 @@
-"""content/events/luoyan.py — 落雁镇事件（GAME_DESIGN §5.1：集市为主，经济类事件
+"""content/events/luoyan.py — 落雁镇事件（README §3.6：集市为主，经济类事件
 密集）。
 """
 from __future__ import annotations

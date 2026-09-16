@@ -24,7 +24,7 @@ class _FixedRng:
 
 def _non_query_play_turn_mock(event_id: str = "eat") -> MagicMock:
     """ChatController 现在会先用 play_turn.parser 判断是不是只读查询命令
-    （GAME_DESIGN §3.1），所以纯 MagicMock() 的 parser.parse() 会返回一个"什么都
+    （README §3.3），所以纯 MagicMock() 的 parser.parse() 会返回一个"什么都
     真"的 Mock，把每条命令误判成查询。测试用这个 helper 把 parser 配成一条
     普通（非查询）命令。"""
     play_turn = MagicMock()
@@ -51,6 +51,26 @@ class ChatControllerTests(unittest.TestCase):
 
         play_turn.handle_player_text.assert_called_once()
         agent_repo.save.assert_called_once_with(agent)
+
+    def test_character_service_save_player_is_used_when_wired(self):
+        agent = make_agent()
+        agent_repo = MagicMock()
+        agent_repo.load.return_value = agent
+        world_repo = MagicMock()
+        world_repo.assemble_view.return_value = make_world()
+        play_turn = _non_query_play_turn_mock()
+        play_turn.handle_player_text.return_value = TurnResult()
+        events = MagicMock()
+        events.get_by_id.return_value = None
+        characters = MagicMock()
+
+        controller = ChatController(
+            agent_repo, world_repo, play_turn, events, characters=characters
+        )
+        controller.on_player_message("吃饭", "A")
+
+        characters.save_player.assert_called_once_with(agent)
+        agent_repo.save.assert_not_called()
 
     def test_response_reports_agent_state_after_turn(self):
         agent = make_agent()
@@ -96,7 +116,7 @@ class ChatControllerTests(unittest.TestCase):
         self.assertIn(default_move_def().variants[0].text.format(地点="苍梧城·城门"), response.narrative)
 
     def test_query_command_bypasses_play_turn_entirely(self):
-        """打听 NPC 是只读查询：不该碰 PlayTurnService（GAME_DESIGN §3.1）。"""
+        """打听 NPC 是只读查询：不该碰 PlayTurnService（README §3.3）。"""
         agent = make_agent()
         agent_repo = MagicMock()
         agent_repo.load.side_effect = [agent, LookupError()]
@@ -115,7 +135,7 @@ class ChatControllerTests(unittest.TestCase):
 
     def test_scan_command_discovers_hidden_location_and_saves_world(self):
         """神识扫描命中：不进 PlayTurnService，命中后把发现状态存回 world_repo
-        （GAME_DESIGN §5.3：discovered 要跨会话保留）。"""
+        （README §3.6：discovered 要跨会话保留）。"""
         agent = make_agent(location_id="cangwu")
         agent_repo = MagicMock()
         agent_repo.load.return_value = agent

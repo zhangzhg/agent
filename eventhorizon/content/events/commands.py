@@ -1,4 +1,4 @@
-"""content/events/commands.py — P0 命令型事件（GAME_DESIGN §3.1 表格 + §9.2 P0）。
+"""content/events/commands.py — P0 命令型事件（README §3.3 表格 + §9.2 P0）。
 
 move / retreat_start / inspect_npc 是系统命令，不在这里（ChatParser 内置识别，
 PlayTurnService 特判处理，见 model/services/chat_parser.py 顶部注释）。
@@ -198,7 +198,7 @@ IDLE_WANDER = GameEventDef(
     exclusive_tags=(),
     priority=5,
     tags=("生活",),
-    # 优化策略.md 策略一的"通用闲逛指令"：别名+narrative_embedding 让向量兜底
+    # 策略一的"通用闲逛指令"：别名+narrative_embedding 让向量兜底
     # （_match_command_by_intent）能自然接住"到处走走看"这类含糊输入，不用专门
     # 写关键词特判。同时也是 handle_player_text 兜底链彻底失败时的终极兜底
     # （见 play_turn.py::_idle_wander_fallback）——不管走哪条路径命中，语义都一致：

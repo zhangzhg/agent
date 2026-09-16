@@ -1,7 +1,7 @@
 """view/schemas/web_schemas.py — Web API 的请求/响应模型（controller/web_controller.py
 用它）。
 
-这里用 Pydantic 而不是 chat_schemas.py 那套裸 dataclass：ARCHITECTURE §10 的技术
+这里用 Pydantic 而不是 chat_schemas.py 那套裸 dataclass：README §5 的技术
 选型说明允许"如果用 Pydantic 定义请求/响应模型，放在 view/schemas/，并在
 controller 层完成 Pydantic 模型 ↔ model.domain dataclass 的转换，model 包本身不
 import pydantic"——FastAPI 路由本来就要用 Pydantic 做请求校验，没必要额外包一层
@@ -13,8 +13,23 @@ from pydantic import BaseModel
 
 
 class ChatApiRequest(BaseModel):
-    agent_id: str = "player"
+    agent_id: str
+    verify_code: str
     text: str
+
+
+class CharacterCreateRequest(BaseModel):
+    agent_id: str
+
+
+class CharacterCreateResponse(BaseModel):
+    agent_id: str
+    verify_code: str
+
+
+class CharacterEnterRequest(BaseModel):
+    agent_id: str
+    verify_code: str
 
 
 class CalendarPanelDTO(BaseModel):
@@ -51,3 +66,4 @@ class ChatApiResponse(BaseModel):
     parse_error: str | None = None
     reject_reason: str | None = None
     sidebar: SidebarDTO
+    event_expired: bool = False

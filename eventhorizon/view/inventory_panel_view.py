@@ -1,4 +1,4 @@
-"""view/inventory_panel_view.py — 背包面板（GAME_DESIGN §2.6）。
+"""view/inventory_panel_view.py — 背包面板（README §3.2）。
 
 简单堆叠列表：图标 + 名称 + 数量，点击查看物品描述（只读 tooltip）。使用/丢弃
 物品仍靠聊天，面板不放"使用"按钮——这里只产出展示数据，没有任何动作字段。

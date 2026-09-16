@@ -1,4 +1,4 @@
-"""model/services/npc_query_service.py — 只读 NPC 信息卡查询（GAME_DESIGN §3.1 /
+"""model/services/npc_query_service.py — 只读 NPC 信息卡查询（README §3.3 /
 §6.3）。
 
 "打听{NPC}"是只读查询命令：不改状态、不进 AgentEventHistory、不消耗回合，因此不

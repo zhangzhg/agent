@@ -1,5 +1,4 @@
-"""model/services/retreat_intent_parser.py — 闭关时长的自然语言解析（GAME_DESIGN
-§4.3）。
+"""model/services/retreat_intent_parser.py — 闭关时长的自然语言解析（README §3.5）。
 
 "十年" → 固定时辰目标；"到金丹为止" → 目标境界（RetreatService.run 用 stop_when
 判定，target_shichen 仍是安全上限，防止一直卡在同一境界怎么也过不去）；
@@ -11,13 +10,12 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from model.domain.time import DAYS_PER_MONTH, MONTHS_PER_YEAR, SHICHEN_PER_DAY
+from model.domain.time import SHICHEN_PER_YEAR
 
 if TYPE_CHECKING:
     from model.domain.agent import Agent
     from model.domain.balance import BalanceTable
 
-SHICHEN_PER_YEAR = SHICHEN_PER_DAY * DAYS_PER_MONTH * MONTHS_PER_YEAR
 _SAFETY_CAP_YEARS = 500  # "到XX为止"式闭关的安全上限，避免资质太低时无限循环
 
 _ARABIC_YEAR_PATTERN = re.compile(r"(\d+)\s*年")

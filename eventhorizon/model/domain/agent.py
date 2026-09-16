@@ -230,14 +230,14 @@ class Agent:
     pending_scenario: PendingScenario | None = None
     scene_focus: str | None = None  # 如"金龙鱼"，供「去围观」解析
 
-    # —— 先天属性（GAME_DESIGN §6.1 / §7.5，ARCHITECTURE 未建模，此处按内容设计补齐）——
+    # —— 先天属性（README §3.6 / §7.5，底座原设计未建模，此处按内容设计补齐）——
     spirit_root: str = ""  # 灵根，如"水木双灵根"
     aptitude: float = 1.0  # 资质：修炼速度倍率，正态分布均值 1.0（"中人之姿"）
     luck: float = 0.0  # 运势：均匀分布，隐藏谓词 luck_gte 读它，不在编辑器谓词白名单里暴露
     insight: float = 0.0  # 悟性：影响顿悟类奇遇的 novelty_curve_override 恢复速度
     origin: str = ""  # 出身：商贾/农家/散修/宗门弟子…决定初始 flags 与可用别名
 
-    # —— 交互流程的挂起态（GAME_DESIGN §1.1 / §4.3，与 pending_encounter 同类，必须进快照）——
+    # —— 交互流程的挂起态（README §3.2 / §4.3，与 pending_encounter 同类，必须进快照）——
     turn_count: int = 0  # 已处理的玩家输入轮数；驱动"提示只出现在前 3 轮"（§1.1）
     pending_retreat_prompt: bool = False  # 已说"闭关"，等待"闭关多久"的回答（§4.3）
     pending_clarification: PendingClarification | None = None  # LiveContentAuthor 追问补全

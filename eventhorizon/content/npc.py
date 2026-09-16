@@ -1,4 +1,4 @@
-"""content/npc.py — MVP 示例 NPC 与日程（GAME_DESIGN §6.1，衔接 ScheduleService）。
+"""content/npc.py — MVP 示例 NPC 与日程（README §3.6，衔接 ScheduleService）。
 
 npc_generation.generate_npc 只是纯函数（产出一个 Agent），得有人真的调用它、把
 产物存进仓库、并给至少一个 NPC 配上日程，ScheduleService 才有巡检对象——否则

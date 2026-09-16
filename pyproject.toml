@@ -1,7 +1,7 @@
 [project]
 name = "eventhorizon"
 version = "0.1.0"
-description = "EventHorizon 核心底座：事件驱动的文字修仙游戏引擎（见 ARCHITECTURE.md）"
+description = "EventHorizon 核心底座：事件驱动的文字修仙游戏引擎（见 README.md）"
 requires-python = ">=3.11"
 # Web（controller/web_controller.py + view/web/*）是核心底座的一个入口，不是外挂的
 # 可选组件——跟 CLI 入口一样，装好这一个项目就都能跑，不用另外单独装。httpx 是

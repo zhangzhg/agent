@@ -1,4 +1,4 @@
-"""view/character_panel_view.py — 角色状态面板（GAME_DESIGN §2.4，数值展示的
+"""view/character_panel_view.py — 角色状态面板（README §3.2，数值展示的
 克制原则）。
 
 境界显示当前境界 + 修为进度条，条到头不自动突破。寿元不显示具体数字，只显示

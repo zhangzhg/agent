@@ -1,5 +1,5 @@
 """view/schemas/admin_schemas.py — 录入编辑器（地图/城市/物品/事件）的 Web API
-请求/响应模型（对应 ARCHITECTURE §1.3.3 / GAME_DESIGN §9.3）。
+请求/响应模型（对应 README §1.3.3 / README §6.3）。
 
 跟 web_schemas.py 一样：Pydantic 只用于 FastAPI 请求校验，不进 model 包。事件的
 predicate / result_pool / reply_options 用原始 dict——那正是
@@ -108,7 +108,7 @@ class GenerateItemsResponse(BaseModel):
 
 
 class EventSummaryDTO(BaseModel):
-    """事件列表用的精简视图（ARCHITECTURE §1.3.3："事件列表：筛选/搜索/标签/状态"）。"""
+    """事件列表用的精简视图（README §1.3.3："事件列表：筛选/搜索/标签/状态"）。"""
 
     event_id: str
     tags: list[str]
@@ -187,7 +187,7 @@ class GenerateEventsResponse(BaseModel):
     error: str | None = None
 
 
-# ---------- 模拟触发沙盒（ARCHITECTURE §1.3.3 测试沙盒）----------
+# ---------- 模拟触发沙盒（README §1.3.3 测试沙盒）----------
 
 
 class SimulateRequest(BaseModel):
