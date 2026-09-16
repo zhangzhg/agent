@@ -5,16 +5,11 @@ V1。
 pipeline / matching / arbiter（那些接线在 bootstrap.py 组合根里完成）。开局叙述
 用 content/onboarding.py 的静态文案（README §3.2），每轮附带一行角色/位置
 状态摘要，遵循 §2.4 的数值展示克制原则（境界+进度条、寿元模糊态、饱食图标）。
+对局装配与 Web 共用 open_play_session：同一库、同一 LLM、同一向量、同一控制器。
 """
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
-from bootstrap import DEFAULT_DB_PATH, build_app
-from content.seed import seed_all
-from controller.chat_controller import ChatController
+from controller.play_session import open_play_session
 from model.services.character_service import (
     EVENT_EXPIRED_NARRATIVE,
     CharacterAuthError,
@@ -44,14 +39,14 @@ def _prompt(message: str) -> str:
 
 def _create_character(app) -> tuple[str, str]:
     while True:
-        agent_id = _prompt("人物 id（2～16 个字）：")
+        agent_id = _prompt("人物账号：")
         try:
             created = app.character_service.create(agent_id)
         except InvalidAgentIdError as exc:
             print(exc)
             continue
         except CharacterExistsError:
-            print("这个人物 id 已经有人用了。")
+            print("这个人物账号已经有人用了。")
             continue
         print(f"验证码（只显示一次，请抄下）：{created.verify_code}")
         return created.agent_id, created.verify_code
@@ -60,7 +55,7 @@ def _create_character(app) -> tuple[str, str]:
 def _enter_character(app, agent_id: str = "", verify_code: str = ""):
     while True:
         if not agent_id:
-            agent_id = _prompt("人物 id：")
+            agent_id = _prompt("人物账号：")
         if not verify_code:
             verify_code = _prompt("验证码：")
         try:
@@ -72,22 +67,14 @@ def _enter_character(app, agent_id: str = "", verify_code: str = ""):
 
 
 def run_repl() -> None:
-    db_path = os.environ.get("EVENTHORIZON_DB_PATH") or str(DEFAULT_DB_PATH)
-    if db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    app = build_app(db_path=db_path)
-    if not app.world.locations:
-        seed_all(app)
-    controller = ChatController(
-        app.agent_repo, app.world_repo, app.play_turn, app.events,
-        rng=app.rng, characters=app.character_service,
-    )
+    session = open_play_session()
+    app = session.app
+    controller = session.controller
 
     print("《太一仙途》CLI（Ctrl+C 退出）")
     print("1) 建立人物")
     print("2) 进入游戏")
-    preset_id = sys.argv[1] if len(sys.argv) > 1 else ""
-    choice = "2" if preset_id else ""
+    choice = ""
     while choice not in ("1", "2"):
         choice = _prompt("请选择 1 或 2：")
 
@@ -96,7 +83,7 @@ def run_repl() -> None:
             agent_id, verify_code = _create_character(app)
             entered = _enter_character(app, agent_id, verify_code)
         else:
-            entered = _enter_character(app, preset_id)
+            entered = _enter_character(app)
     except (EOFError, KeyboardInterrupt):
         print("\n再会。")
         return

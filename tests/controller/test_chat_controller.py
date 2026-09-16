@@ -259,6 +259,26 @@ class WorldQueryAssistantWiringTests(unittest.TestCase):
 
         world_query.answer.assert_not_called()
 
+    def test_unparsed_where_question_uses_function_call_before_听不懂(self):
+        """规则解析认不出时，听不懂之前先走 WorldQueryAssistant function calling。"""
+        agent = make_agent()
+        agent_repo = MagicMock()
+        agent_repo.load.return_value = agent
+        world_repo = MagicMock()
+        world_repo.assemble_view.return_value = make_world()
+        play_turn = MagicMock()
+        play_turn.parser.parse.return_value = None
+        events = MagicMock()
+        world_query = MagicMock()
+        world_query.answer.return_value = "你现在在苍梧城主街。"
+
+        controller = ChatController(agent_repo, world_repo, play_turn, events, world_query=world_query)
+        response = controller.on_player_message("告诉我现在在哪", "A")
+
+        world_query.answer.assert_called_once()
+        play_turn.handle_player_text.assert_not_called()
+        self.assertEqual(response.narrative, "你现在在苍梧城主街。")
+
 
 if __name__ == "__main__":
     unittest.main()

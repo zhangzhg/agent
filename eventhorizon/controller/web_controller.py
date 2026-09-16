@@ -6,26 +6,18 @@ pipeline / matching / arbiter——那些接线仍然全部在 bootstrap.py 完�
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from bootstrap import DEFAULT_DB_PATH, build_app
-from content.seed import seed_all
 from controller.admin_controller import register_admin_routes
-from controller.chat_controller import ChatController
-from model.repositories.llm.llm_config import load_llm_config
+from controller.play_session import open_play_session
 from model.repositories.llm.llm_event_flavor_author import LlmEventFlavorAuthor
 from model.repositories.llm.llm_item_author import LlmItemAuthor
 from model.repositories.llm.llm_location_author import LlmLocationAuthor
 from model.repositories.llm.llm_result_text_parser import LlmResultTextParser
-from model.repositories.llm.openai_compatible_client import OpenAiCompatibleClient
-from model.services.local_embedding import FallbackEmbeddingClient
-from model.services.world_query_assistant import WorldQueryAssistant
 from model.services.character_service import (
     EVENT_EXPIRED_NARRATIVE,
     CharacterAuthError,
@@ -48,43 +40,13 @@ from view.templating import STATIC_DIR, templates
 if TYPE_CHECKING:
     from bootstrap import AppContext
 
-# 网页版默认落一个真的 sqlite 文件（bootstrap.build_app() 自己的默认值是
-# ":memory:"，那是给测试用的，测试要的就是每次都从空白状态开始，互不污染）——
-# 录入编辑器存的地图/物品/事件是要长期攒的内容，进程一重启就清空说不过去。
-# 路径在 bootstrap.DEFAULT_DB_PATH；EVENTHORIZON_DB_PATH 可以整个覆盖掉。
-
 
 def create_app(db_path: str | None = None) -> FastAPI:
-    if db_path is None:
-        db_path = os.environ.get("EVENTHORIZON_DB_PATH") or str(DEFAULT_DB_PATH)
-    if db_path != ":memory:":
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-
-    llm_config = load_llm_config()
-    llm_client = OpenAiCompatibleClient(llm_config) if llm_config.configured else None
-    # complete() 走远端 GLM；向量化不走——这个账号的 embedding 额度已经确认没有
-    # （/embeddings 恒 429），每次先打一遍远端再等它失败没有意义，只是白白多一趟
-    # 网络往返、刷一堆没用的失败日志。FallbackEmbeddingClient 传 None 当"主力
-    # 客户端"，embed_with_fallback（model/services/local_embedding.py）直接从
-    # 本地模型 BAAI/bge-small-zh-v1.5 起步（再往下才是字符哈希兜底），predicate_text
-    # 向量判定、物品匹配、事件叙事重排各处照常拿到能用的向量，不受影响。
-    embedding_client = FallbackEmbeddingClient(None)
-    # narrative_writer 复用同一个 complete()——LlmEventWriter（README 对局第二段
-    # 表格）：事件命中但 variants 留空时现场补一句文案，见 PlayTurnService._ensure_variants。
-
-    app_ctx = build_app(db_path=db_path, embedding=embedding_client, narrative_writer=llm_client)
-    if not app_ctx.world.locations:
-        # 空库（真·第一次跑，或者用的是 :memory:）才灌种子内容——已经有数据的库
-        # 再灌一遍：locations 是按 id upsert 还好，但 routes 是直接 extend，会
-        # 越滚越多重复；events/items 也会把用户在编辑器里改过的同 id 内容悄悄
-        # 冲回种子原文，两种都不是"重启后应该发生的事"。
-        seed_all(app_ctx)
-    world_query = WorldQueryAssistant(llm_client) if llm_client is not None else None
-    controller = ChatController(
-        app_ctx.agent_repo, app_ctx.world_repo, app_ctx.play_turn, app_ctx.events,
-        rng=app_ctx.rng, world_query=world_query,
-        characters=app_ctx.character_service,
-    )
+    session = open_play_session(db_path)
+    app_ctx = session.app
+    controller = session.controller
+    llm_client = session.llm_client
+    embedding_client = session.embedding
 
     fastapi_app = FastAPI(title="太一仙途")
     fastapi_app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")  # theme.css 等两页共用资源
@@ -100,7 +62,7 @@ def create_app(db_path: str | None = None) -> FastAPI:
         except InvalidAgentIdError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except CharacterExistsError:
-            raise HTTPException(status_code=409, detail="这个人物 id 已经有人用了。") from None
+            raise HTTPException(status_code=409, detail="这个人物账号已经有人用了。") from None
         return CharacterCreateResponse(agent_id=created.agent_id, verify_code=created.verify_code)
 
     @fastapi_app.post("/api/session", response_model=ChatApiResponse)

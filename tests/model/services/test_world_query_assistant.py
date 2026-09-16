@@ -23,6 +23,7 @@ class _FakeToolClient:
 class LooksLikeInfoQuestionTests(unittest.TestCase):
     def test_where_am_i_matches(self):
         self.assertTrue(looks_like_info_question("我在哪里"))
+        self.assertTrue(looks_like_info_question("告诉我现在在哪"))
 
     def test_nearest_cities_matches(self):
         self.assertTrue(looks_like_info_question("离我最近的城市有哪些"))

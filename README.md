@@ -221,7 +221,7 @@ Agent 上现有挂起态：`pending_encounter_id`、`pending_scenario`、`pendin
 
 ## 1.14 世界信息问答
 
-“我在哪里”“附近有哪些城市”走独立只读路径，不进 §1.13。关键词粗筛 → `WorldQueryAssistant` function calling（`get_player_status` / `list_reachable_locations` 等）→ 先拿真实数据再作答。模型判断不是在问信息时返回 `None`，**原样回落命令解析链**，不能截胡正常指令。
+“我在哪里”“告诉我现在在哪”“附近有哪些城市”走独立只读路径，不进 §1.13。规则解析认不出、或关键词粗筛命中时 → `WorldQueryAssistant` function calling（`get_player_status` / `get_current_location` / `list_reachable_locations` 等）→ 先拿真实数据作答。模型判断不是在问信息时返回 `None`，**原样回落命令解析链**，不能截胡正常指令。CLI 与网页一样接入同一套 LLM 客户端；未配置模型时才落到“听不懂”软性引导。
 
 ## 1.15 延迟结果
 
@@ -392,7 +392,7 @@ python -m unittest discover -s tests -t . -p "test_*.py"
 
 单测最小集：总线投递顺序、仲裁丢弃、状态拒绝非法指令、工厂按 type 还原、链中校验失败不写因果、分支不计时但记历史、寿元/年龄随日常时间走、死亡后转世同一 agent_id。
 
-Web（`controller/web_controller.py` + `view/`）是核心底座的一个入口，不是外挂可选组件。CLI 与网页共用同一 sqlite；启动后先建立人物，或输入人物 id + 验证码进入。
+Web（`controller/web_controller.py` + `view/`）与 CLI 共用 `controller/play_session.py`：同一 sqlite、同一 LLM、同一本地向量、同一 `ChatController`。启动后先选建立人物或进入游戏。
 
 ---
 
@@ -453,3 +453,14 @@ Web（`controller/web_controller.py` + `view/`）是核心底座的一个入口�
 | 纯英文输入当乱码 | 中文游戏可接受的边界 |
 
 录入自检：谓词只用白名单；至少 1 条默认变体；叙述与结果池对得上；冷却/次数/互斥按密度配置；`needs_reply` 的别名覆盖接受/拒绝/无关三种反应。
+
+
+## 案例
+```
+> .\start.bat
+1) 建立人物
+2) 进入游戏
+请选择 1 或 2：1
+人物 id（2～16 个字）：123
+验证码（只显示一次，请抄下）：4SGU2W
+```

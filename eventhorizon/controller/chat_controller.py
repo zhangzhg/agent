@@ -52,20 +52,21 @@ class ChatController:
         agent = self._agent_repo.load(agent_id)
         world = self._world_repo.assemble_view()
 
-        # 世界信息问答（"我在哪里""离我最近的城市有哪些"）跟 inspect_npc/scan 一样
-        # 只读、不消耗回合，但检测方式不一样：不是精确别名表，是关键词粗筛 + 让
-        # WorldQueryAssistant 自己用 function calling 判断"这真的是在问信息吗、
-        # 答不答得上来"。判断下来不是（或者没配大模型/调用失败）就原样往下走，
-        # 当作没发生过——绝不能因为关键词猜错了，就把一句正常的游戏指令截胡。
-        if self._world_query is not None and looks_like_info_question(raw_text):
-            answer = self._world_query.answer(agent, world, raw_text)
-            if answer is not None:
-                return ChatResponse(narrative=answer, agent_state=agent.state.name)
-
         # 只读查询命令不进两段式循环：不改状态、不消耗回合、不进 AgentEventHistory。
         cmd = self._play_turn.parser.parse(raw_text, agent.scene_focus)
         if cmd is not None and (cmd.is_query or cmd.event_id in QUERY_EVENT_IDS):
             return self._handle_query(cmd, agent, world)
+
+        # 世界信息问答（"我在哪里""告诉我现在在哪"）跟 inspect_npc/scan 一样只读。
+        # 关键词命中，或规则解析完全认不出时，用 function calling 读真实地点/状态；
+        # 模型判断不是在问信息（或没配大模型/调用失败）就回落到两段式命令链。
+        # 挂起态不走这条：选项回复不能被信息问答截胡。
+        if self._world_query is not None and (
+            looks_like_info_question(raw_text) or (cmd is None and _free_for_info_query(agent))
+        ):
+            answer = self._world_query.answer(agent, world, raw_text)
+            if answer is not None:
+                return ChatResponse(narrative=answer, agent_state=agent.state.name)
 
         result = self._play_turn.handle_player_text(agent, world, raw_text)
         if self._characters is not None:
@@ -135,6 +136,18 @@ class ChatController:
     # 保留与文档同名的函数式入口，行为等价，方便直接照 README §7 的示例调用。
     def __call__(self, raw_text: str, agent_id: str) -> ChatResponse:
         return self.on_player_message(raw_text, agent_id)
+
+
+def _free_for_info_query(agent) -> bool:
+    """奇遇/闭关/追问挂起时，下一句优先当回复，不先拿去问地图。"""
+    if agent.state.name == "dead":
+        return False
+    return not (
+        agent.pending_retreat_prompt
+        or agent.pending_clarification is not None
+        or agent.pending_scenario is not None
+        or agent.pending_encounter_id is not None
+    )
 
 
 def build_request(agent_id: str, text: str) -> ChatRequest:

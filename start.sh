@@ -8,8 +8,7 @@
 # see conftest.py for the same convention used by the test suite.
 #
 # Usage:
-#   start.sh                     CLI, agent_id=player
-#   start.sh <agent_id>          CLI, custom agent_id
+#   start.sh                     CLI（先选建立人物或进入游戏）
 #   start.sh web [host] [port]   Web UI, default 127.0.0.1:8765
 set -euo pipefail
 
@@ -50,5 +49,4 @@ if [ "${1:-}" = "web" ]; then
     exec "$PYTHON_BIN" -m controller.web_controller "$HOST" "$PORT"
 fi
 
-AGENT_ID="${1:-player}"
-exec "$PYTHON_BIN" -m controller.cli_controller "$AGENT_ID"
+exec "$PYTHON_BIN" -m controller.cli_controller
